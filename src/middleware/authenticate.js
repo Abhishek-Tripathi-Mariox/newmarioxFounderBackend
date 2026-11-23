@@ -3,6 +3,8 @@ import { config } from '../config/index.js';
 import { Member, RefreshToken, Role, SalesOwner, User } from '../db/models/index.js';
 import { ensureFounderOwner } from '../modules/people/founderOwners.js';
 import { PARTNER_ROLE, SUPER_ROLE } from '../db/models/roles.js';
+import { normalisePerms } from '../core/permissions.js';
+import { hqRoleOf } from '../db/models/users.js';
 import { TEXT_ORDER } from '../db/modelKit.js';
 import { unauthorized, forbidden } from '../core/errors.js';
 import { REFRESH_COOKIE, hashToken } from '../core/tokens.js';
@@ -21,7 +23,7 @@ const personIdOf = (u, founderOwner = false) => u.member_id || (founderOwner ? n
  */
 export async function loadPrincipal(userId, { withReportees = true } = {}) {
   const u = await User.findOne({ id: userId })
-    .select('name email status member_id owner_id client_of dept shift_hours role_id hq_seat pp_user_id').rows();
+    .select('name email status member_id owner_id client_of dept shift_hours role_id hq_seat hq_role pp_user_id').rows();
   if (!u) return null;
   // Founders own leads: their sales-owner profile is created on first need.
   if (u.hq_seat && !u.owner_id) u.owner_id = await ensureFounderOwner(u.id);
@@ -38,10 +40,12 @@ export async function loadPrincipal(userId, { withReportees = true } = {}) {
     name: u.name,
     email: u.email,
     status: u.status,
-    role: { id: role.id, name: role.name, perms: role.perms || {} },
+    // Every module present; a legacy single `pp` switch is expanded into the partner modules.
+    role: { id: role.id, name: role.name, perms: normalisePerms(role.perms) },
     isSuper: role.id === SUPER_ROLE,
     isPartner: role.id === PARTNER_ROLE,
-    hqSeat: u.hq_seat || null,
+    hqSeat: u.hq_seat || null, // Founders HQ person id (docs/SSO.md)
+    hqRole: hqRoleOf(u), // 'founder' | 'cofounder' | null
     ppUserId: u.pp_user_id || null,
     memberId: u.member_id,
     ownerId: u.owner_id,

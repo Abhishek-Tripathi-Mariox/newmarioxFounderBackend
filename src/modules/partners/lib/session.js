@@ -1,6 +1,7 @@
 import { PpUser, User } from '../../../db/models/index.js';
 import { resolveSession } from '../../../middleware/authenticate.js';
 import { can } from '../../../middleware/authorize.js';
+import { PP_MODULES, canPartnerAdmin, hasAction } from '../../../core/permissions.js';
 import { appsOf } from '../../auth/auth.service.js';
 import { PpError } from './http.js';
 
@@ -9,18 +10,19 @@ import { PpError } from './http.js';
  * person is the one signed in to Mariox One (the portal's `mx_refresh` session cookie, or a Bearer
  * access token), and their Mariox Partners identity is a `pp_users` profile linked by `users.pp_user_id`:
  *   - role Partner (`r-partner`) → their partner profile (must exist and not be disabled);
- *   - Super Admin or a role with the `pp` permission → their partner-admin profile, created and
- *     linked on first use. `pp.v` opens the admin side read-only, `pp.e` may change things.
+ *   - Super Admin or a role that can view any partner admin module (`pp_*`, src/core/permissions.js)
+ *     → their partner-admin profile, created and linked on first use. What they may see and change is
+ *     checked per route and section with `adminCan(module, action)`.
  *
- * Sets `req.pp = { sub, role: 'admin'|'partner', name, canEdit, userId, tokenHash, apps }`: `sub` is the
- * pp_users id the services scope by, `userId` / `tokenHash` the portal account and this device's session,
- * `apps` the areas the person can open (same shape as the portal auth payload).
+ * Sets `req.pp = { sub, role: 'admin'|'partner', name, userId, tokenHash, apps, perms, principal }`: `sub` is
+ * the pp_users id the services scope by, `userId` / `tokenHash` the portal account and this device's
+ * session, `apps` the areas the person can open (same shape as the portal auth payload), `perms` the
+ * admin's partner-module permissions ({} for partners), `principal` the portal user.
  *
  * 401 = no valid Mariox One session (the frontend sends people to /login); 403 = signed in without
  * access to this part of Mariox Partners (the frontend shows "no access").
  */
 
-const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const SESSION_ERRORS = {
   none: 'Not signed in',
   ended: 'Your session ended. Please sign in again.',
@@ -62,6 +64,11 @@ async function adminProfile(principal) {
   return profile;
 }
 
+/** The admin's partner-module permissions, `{ pp_acq: { v, c, e, d }, … }` (Super Admin: everything that exists). */
+export function ppPermsOf(principal) {
+  return Object.fromEntries(PP_MODULES.map((m) => [m, Object.fromEntries(['v', 'c', 'e', 'd'].map((a) => [a, hasAction(m, a) && can(principal, m, a)]))]));
+}
+
 /** Middleware: requires a portal session with access to Mariox Partners; sets `req.pp`. */
 export async function requireSession(req, _res, next) {
   const { principal, tokenHash, reason } = await resolveSession(req);
@@ -70,17 +77,13 @@ export async function requireSession(req, _res, next) {
   let pp;
   if (principal.isPartner) {
     const profile = await partnerProfile(principal);
-    pp = { sub: String(profile._id), role: 'partner', name: profile.name, canEdit: true };
+    pp = { sub: String(profile._id), role: 'partner', name: profile.name, perms: {} };
   } else {
-    if (!can(principal, 'pp', 'v')) throw new PpError(403, 'Your role has no access to Mariox Partners');
+    if (!canPartnerAdmin(principal)) throw new PpError(403, 'Your role has no access to Mariox Partners');
     const profile = await adminProfile(principal);
-    pp = { sub: String(profile._id), role: 'admin', name: profile.name, canEdit: can(principal, 'pp', 'e') };
+    pp = { sub: String(profile._id), role: 'admin', name: profile.name, perms: ppPermsOf(principal) };
   }
-  // View-only partner admins can read everything but change only their own profile / password.
-  if (!pp.canEdit && !SAFE_METHODS.has(req.method) && !req.baseUrl.endsWith('/me')) {
-    throw new PpError(403, 'Your role can view Mariox Partners but not change it');
-  }
-  req.pp = { ...pp, userId: principal.id, tokenHash, apps: appsOf(principal) };
+  req.pp = { ...pp, userId: principal.id, tokenHash, apps: appsOf(principal), principal };
   next();
 }
 
@@ -88,6 +91,33 @@ export async function requireSession(req, _res, next) {
 export function requireAdmin(req, _res, next) {
   if (req.pp?.role !== 'admin') throw new PpError(403, 'Admins only');
   next();
+}
+
+const VERB = { v: 'view', c: 'add', e: 'change', d: 'delete' };
+const SECTION = {
+  pp_overview: 'the overview', pp_acq: 'partner acquisition', pp_partners: 'partners', pp_leads: 'partner leads',
+  pp_projects: 'projects and payouts', pp_requests: 'requests', pp_kit: 'the sales kit', pp_settings: 'settings',
+};
+const denied = (mod, act) => new PpError(403, `Your role can’t ${VERB[act]} ${SECTION[mod]} in Mariox Partners`);
+
+/** Does this admin's role allow `act` on partner module `mod`? (false for partners) */
+export const adminMay = (s, mod, act = 'v') => s.role === 'admin' && !!s.perms?.[mod]?.[act];
+
+/**
+ * Middleware (after requireSession): an admin's role must allow `act` on partner module `mod`.
+ * Partners pass (the route serves them their own records); use `adminOnly` for admin-only routes.
+ */
+export const adminCan = (mod, act = 'v') => (req, _res, next) => {
+  if (req.pp.role === 'admin' && !adminMay(req.pp, mod, act)) throw denied(mod, act);
+  next();
+};
+
+/** Middleware: admins only, and their role must allow `act` on `mod`. */
+export const adminOnly = (mod, act = 'v') => [requireAdmin, adminCan(mod, act)];
+
+/** Throws 403 unless the admin may `act` on `mod` (for checks that depend on the request body). */
+export function assertAdminMay(s, mod, act) {
+  if (!adminMay(s, mod, act)) throw denied(mod, act);
 }
 
 /** Partners only ever see their own records; admins see everything. */

@@ -105,9 +105,13 @@ export async function shiftReports(pids, { from, to } = {}) {
     outcome: r.outcome,
     calls: r.calls,
     meetings: r.meetings,
-    rows: (r.rows || []).map((x) => ({ p: x.p, ms: x.ms ?? null, h: Number(x.h) || 0, note: x.note || '' })),
+    rows: (r.rows || []).map((x) => ({ p: x.p, ms: x.ms ?? null, h: Number(x.h) || 0, note: x.note || '', ...(x.tt ? { tt: x.tt } : {}) })),
     pm: (r.pm_rows || []).map((x) => ({ p: x.p, st: x.st, note: x.note || '' })),
-    internal: (r.internal_rows || []).map((x) => ({ cat: x.cat || 'Other', h: Number(x.h) || 0, note: x.note || '' })),
+    internal: (r.internal_rows || []).map((x) => ({ cat: x.cat || 'Other', h: Number(x.h) || 0, note: x.note || '', ...(x.tt ? { tt: x.tt } : {}) })),
+    // Team tasks reported (only on reports that have them, so older reports keep their exact shape).
+    ...((r.team_tasks || []).length ? {
+      teamTasks: r.team_tasks.map((x) => ({ id: x.id, title: x.title || x.id, done: !!x.done, h: Number(x.h) || 0, note: x.note || '', p: x.p || null, to: x.to || null })),
+    } : {}),
     leadRows: (r.lead_rows || []).map((x) => ({ lead: x.lead, company: x.company || x.lead, kind: x.kind || 'call', note: x.note || '', next: x.next || '' })),
   }));
 }

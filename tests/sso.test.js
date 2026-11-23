@@ -114,7 +114,7 @@ describe('what each area accepts', () => {
     const { agent: admin } = await signIn('admin@test.io');
     const denied = await admin.get(`${HQ}/workspace`);
     expect(denied.status).toBe(403);
-    expect(denied.body.error.message).toBe('Founders HQ is only open to the Founder and the Co-founder.');
+    expect(denied.body.error.message).toBe('Founders HQ is only open to founders and co-founders.');
 
     // Only a Super Admin can set the seat; one person per seat; never on partners / clients.
     const asAdmin = await as('admin@test.io');
@@ -135,9 +135,12 @@ describe('what each area accepts', () => {
     const { agent: ceo } = await signIn('ceo@test.io');
     const created = await ceo.post(`${HQ}/users`).send({ name: 'Saswat', email: 'saswat@test.io', password: 'a-good-password' });
     expect(created.status).toBe(201);
-    expect(created.body.data).toMatchObject({ seat: 'saswat', seatLabel: 'Co-founder', email: 'saswat@test.io' });
+    // A new member gets a person id of their own (from their user id) and is a Co-founder by default.
+    const personId = created.body.data.seat;
+    expect(personId).toBe(created.body.data.userId);
+    expect(created.body.data).toMatchObject({ role: 'cofounder', seatLabel: 'Co-founder', email: 'saswat@test.io' });
     const { agent: saswat, res } = await signIn('saswat@test.io', 'a-good-password');
-    expect(res.body.data.user).toMatchObject({ isSuper: true, apps: { founders: 'saswat' } });
+    expect(res.body.data.user).toMatchObject({ isSuper: true, apps: { founders: personId, foundersRole: 'cofounder' } });
     expect((await ceo.get(`${HQ}/users`)).body.data.map((u) => u.email)).toEqual(['ceo@test.io', 'saswat@test.io']);
 
     expect((await ceo.delete(`${HQ}/users/${created.body.data.id}`)).status).toBe(204);
@@ -146,14 +149,17 @@ describe('what each area accepts', () => {
     expect(await User.findOne({ email: 'saswat@test.io' }).rows()).toMatchObject({ status: 'Active', hq_seat: null, role_id: 'r-super' });
   });
 
-  test('partner admins: a role with the pp permission (View = read-only, Edit = changes)', async () => {
+  test('partner admins: the legacy single pp patch still works (View = read-only, Edit = changes)', async () => {
     const ceo = await as('ceo@test.io');
     const partnerRole = (await ceo.get(`${API}/roles`)).body.data.find((r) => r.id === 'r-partner');
     expect(partnerRole).toMatchObject({ name: 'Partner', locked: true });
     expect((await ceo.patch(`${API}/roles/r-partner`).send({ name: 'X' })).body.error.message).toBe('Partner is a locked system role');
+    // { pp } applies to every partner section; c / d follow e (as pp.e allowed before).
     const viewOnly = await ceo.patch(`${API}/roles/r-pm`).send({ perms: { pp: { v: true, c: true, d: true } } });
     expect(viewOnly.status).toBe(200);
-    expect(viewOnly.body.data.perms.pp).toEqual({ v: true, c: false, e: false, d: false, scope: 'all' }); // View / Edit only
+    expect(viewOnly.body.data.perms.pp).toBeUndefined();
+    expect(viewOnly.body.data.perms.pp_partners).toEqual({ v: true, c: false, e: false, d: false, scope: 'all' });
+    expect(viewOnly.body.data.perms.pp_settings).toEqual({ v: true, c: false, e: false, d: false, scope: 'all' });
 
     const { agent: pm, res } = await signIn('pm@test.io');
     expect(res.body.data.user.apps.partners).toBe('admin');
@@ -161,11 +167,11 @@ describe('what each area accepts', () => {
     const rohit = await PpUser.findOne({ email: 'rohit@pp.io' }).lean();
     const blocked = await pm.patch(`${PP}/admin/users/${rohit._id}`).send({ commissionRate: 0.3 });
     expect(blocked.status).toBe(403);
-    expect(blocked.body).toEqual({ error: 'Your role can view Mariox Partners but not change it' });
+    expect(blocked.body).toEqual({ error: 'Your role can’t change partners in Mariox Partners' });
 
     const editRole = await ceo.patch(`${API}/roles/r-pm`).send({ perms: { pp: { v: false } } });
-    expect(editRole.body.data.perms.pp.v).toBe(false);
-    expect((await ceo.patch(`${API}/roles/r-pm`).send({ perms: { pp: { e: true } } })).body.data.perms.pp).toMatchObject({ v: true, e: true }); // Edit implies View
+    expect(editRole.body.data.perms.pp_partners.v).toBe(false);
+    expect((await ceo.patch(`${API}/roles/r-pm`).send({ perms: { pp: { e: true } } })).body.data.perms.pp_acq).toMatchObject({ v: true, c: true, e: true, d: true }); // Edit implies View
     const edited = await pm.patch(`${PP}/admin/users/${rohit._id}`).send({ commissionRate: 0.3 });
     expect(edited.status).toBe(200);
     expect(edited.body.user.commissionRate).toBe(0.3);

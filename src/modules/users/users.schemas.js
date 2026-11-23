@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HQ_SEATS } from '../../db/models/users.js';
+import { HQ_ROLES, LEGACY_HQ_SEATS } from '../../db/models/users.js';
 
 export const userIdParams = z.object({ id: z.string().regex(/^u-[a-z0-9-]{1,40}$/i, 'Invalid user id') });
 
@@ -28,8 +28,10 @@ const fields = {
   joinDate: day.nullable(),
   shiftHours: z.coerce.number().min(1).max(24),
   clientOf: z.array(z.string().regex(/^PR-\d+$/)).max(50),
-  // Founders HQ access (Super Admin only): 'rahul' = Founder seat, 'saswat' = Co-founder seat, null = none.
-  hq_seat: z.enum(HQ_SEATS).nullable(),
+  // Founders HQ access (Super Admin only): 'founder' | 'cofounder' | null = none (any number of each).
+  hq_role: z.enum(HQ_ROLES).nullable(),
+  // Older clients: claim one of the original seats by id ('rahul' = Founder, 'saswat' = Co-founder), null = none.
+  hq_seat: z.enum(Object.keys(LEGACY_HQ_SEATS)).nullable(),
 };
 
 export const createUserSchema = z.object({
@@ -38,6 +40,6 @@ export const createUserSchema = z.object({
   email: fields.email.default(''),
   sendInvite: z.boolean().default(true),
   password: z.string().min(8, 'Use at least 8 characters.').max(128).optional(),
-}).partial({ phone: true, title: true, dept: true, reportsTo: true, joinDate: true, shiftHours: true, clientOf: true, hq_seat: true });
+}).partial({ phone: true, title: true, dept: true, reportsTo: true, joinDate: true, shiftHours: true, clientOf: true, hq_role: true, hq_seat: true });
 
 export const updateUserSchema = z.object(fields).partial();

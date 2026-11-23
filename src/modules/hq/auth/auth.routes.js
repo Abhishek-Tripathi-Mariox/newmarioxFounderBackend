@@ -17,7 +17,7 @@ export function createAuthRouter() {
   const router = Router();
 
   router.get('/me', authenticateHq, async (req, res) => {
-    const account = await User.findOne({ id: req.actor.id }).select('name email last_active_at').rows();
+    const account = await User.findOne({ id: req.actor.id }).select('name email last_active_at hq_role').rows();
     ok(res, { user: toUserDTO(req.hqUser, account) });
   });
   router.post('/logout', async (req, res) => {

@@ -154,7 +154,7 @@ describe('founders own leads', () => {
     const user = await User.findOne({ email: 'co@test.io' }).rows();
     expect(user.owner_id).toBeTruthy();
     expect(await SalesOwner.findOne({ id: user.owner_id }).rows()).toMatchObject({ name: 'Co Founder', founder: true });
-    await updateHqAccount(account.id, { name: 'Co Founder Two' });
+    await updateHqAccount({}, account.id, { name: 'Co Founder Two' });
     expect((await SalesOwner.findOne({ id: user.owner_id }).rows()).name).toBe('Co Founder Two');
   });
 });

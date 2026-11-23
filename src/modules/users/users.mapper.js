@@ -1,3 +1,5 @@
+import { hqRoleOf } from '../../db/models/users.js';
+
 const iso = (d) => (d ? new Date(d).toISOString() : null);
 
 export const toUserDto = (u) => ({
@@ -19,7 +21,8 @@ export const toUserDto = (u) => ({
   ownerId: u.owner_id,
   clientOf: u.client_of || [],
   shiftHours: Number(u.shift_hours),
-  hq_seat: u.hq_seat || null,
+  hq_seat: u.hq_seat || null, // Founders HQ person id
+  hq_role: hqRoleOf(u), // 'founder' | 'cofounder' | null
   ppUserId: u.pp_user_id || null,
   createdAt: iso(u.created_at),
   updatedAt: iso(u.updated_at),

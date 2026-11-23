@@ -56,10 +56,11 @@ describe('POST /hq/users (accounts are created inside the HQ)', () => {
     expect((await rahulAgent.get(`${HQ}/users`)).status).toBe(200); // the seat still opens the HQ
   });
 
-  test('creates an account in the free seat by default (201)', async () => {
+  test('creates a co-founder by default, with a person id of their own (201)', async () => {
     const res = await rahulAgent.post(`${HQ}/users`).send({ name: 'Saswat', email: 'Saswat@Example.com', password: 'a-good-password' });
     expect(res.status).toBe(201);
-    expect(res.body.data.seat).toBe('saswat');
+    expect(res.body.data.seat).toBe(res.body.data.userId);
+    expect(res.body.data.role).toBe('cofounder');
     expect(res.body.data.seatLabel).toBe('Co-founder');
     expect(res.body.data.email).toBe('saswat@example.com');
     expect(res.body.data.lastLoginAt).toBeNull();
@@ -68,12 +69,14 @@ describe('POST /hq/users (accounts are created inside the HQ)', () => {
     await loginAgent(app, 'saswat@example.com', 'a-good-password');
   });
 
-  test('returns 409 when both seats are taken', async () => {
+  test('there is no limit: a third and fourth member can be added next to both original seats', async () => {
     await addSaswat();
-    const res = await rahulAgent.post(`${HQ}/users`).send({ name: 'Third', email: 'third@example.com', password: 'a-good-password' });
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe('CONFLICT');
-    expect(res.body.error.message).toBe('Both seats are taken.');
+    const third = await rahulAgent.post(`${HQ}/users`).send({ name: 'Third', email: 'third@example.com', password: 'a-good-password', role: 'founder' });
+    expect(third.status).toBe(201);
+    expect(third.body.data).toMatchObject({ role: 'founder', seatLabel: 'Founder' });
+    const fourth = await rahulAgent.post(`${HQ}/users`).send({ name: 'Fourth', email: 'fourth@example.com', password: 'a-good-password' });
+    expect(fourth.status).toBe(201);
+    expect((await rahulAgent.get(`${HQ}/users`)).body.data).toHaveLength(4);
   });
 
   test('returns 409 when the requested seat is taken', async () => {
@@ -160,8 +163,8 @@ describe('DELETE /hq/users/:id', () => {
     expect(after.body.error.code).toBe('FORBIDDEN');
     expect((await rahulAgent.get(`${HQ}/users`)).body.data).toHaveLength(1);
     expect(await User.findOne({ email: 'saswat@example.com' }).rows()).toMatchObject({ status: 'Active', hq_seat: null });
-    // The seat is free again.
-    expect((await rahulAgent.post(`${HQ}/users`).send({ name: 'New Co', email: 'newco@example.com', password: 'a-good-password' })).body.data.seat).toBe('saswat');
+    // The original seat id is free again for an older client that asks for it.
+    expect((await rahulAgent.post(`${HQ}/users`).send({ name: 'New Co', email: 'newco@example.com', password: 'a-good-password', seat: 'saswat' })).body.data.seat).toBe('saswat');
   });
 
   test('returns 403 when removing your own account', async () => {

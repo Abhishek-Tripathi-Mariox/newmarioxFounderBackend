@@ -10,6 +10,7 @@ import { ChangeRequest, Member, Milestone, MilestoneMember, Project, ProjectLink
 import { nextId } from '../../core/ids.js';
 import { visibleProjectIds } from '../../core/scope.js';
 import { forbidden, notFound, unprocessable } from '../../core/errors.js';
+import { can } from '../../middleware/authorize.js';
 import { pageParams } from '../../core/http.js';
 import * as repo from './projects.repository.js';
 import { toDocument } from './projects.mapper.js';
@@ -21,8 +22,11 @@ import { emailMilestoneToClient, clientMailNote } from './clientEmails.js';
 
 /* ───────────── Access helpers (shared with milestones, change requests, portal) ───────────── */
 
-/** Frontend isPMof(): Super Admin, or a Project Manager who manages this project. */
-export const isPMof = (user, p) => !!user && (user.isSuper || (user.role.id === 'r-pm' && !!p && !!user.memberId && user.memberId === p.pmId));
+/**
+ * Frontend isPMof(): Super Admin, or the project's PM (its `pmId` is their member id) whose role can
+ * edit projects — any role, not only the built-in Project Manager.
+ */
+export const isPMof = (user, p) => !!user && (user.isSuper || (can(user, 'projects', 'e') && !!p && !!user.memberId && user.memberId === p.pmId));
 
 export async function canSee(user, projectId) {
   const ids = await visibleProjectIds(user);

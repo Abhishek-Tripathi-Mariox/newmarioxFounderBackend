@@ -15,5 +15,6 @@ export const ShiftReport = defineModel('shift_reports', {
   pm_rows: json([]), // [{ p, st, note }]
   internal_rows: json([]), // [{ cat, h, note }]
   lead_rows: json([]), // [{ lead, kind, note, next }]
+  team_tasks: json([]), // [{ id, title, done, was, h, note, p, to }] team tasks reported (done = completed in this report)
   submitted_at: ts(Date.now),
 }, { pk: PK.serial, stamps: false, indexes: [[{ person_id: 1, day: 1 }, { unique: true }], [{ day: 1 }]] });

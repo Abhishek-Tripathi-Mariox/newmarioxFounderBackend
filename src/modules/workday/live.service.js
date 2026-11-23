@@ -302,13 +302,14 @@ export async function attendance(AF) {
 }
 
 /** CSV rows: one line per person per working day in range. */
-export async function attendanceCsv(AF) {
+/** `pids`: whose rows the caller may export (null = everyone). */
+export async function attendanceCsv(AF, pids = null) {
   const now = Date.now();
   const T = sod(now);
   const { rng } = resolveRange(AF, T);
   const aDays = workdays(rng, T);
   const aq = (AF.q || '').trim().toLowerCase();
-  const all = await loadRange(rng, T);
+  const all = await loadRange(rng, T, pids ? (p) => pids.includes(p.id) : undefined);
   const aPpl = all.ppl.filter((p) => (!AF.person || p.id === AF.person) && (!AF.team || p.team === AF.team) && (!aq || p.name.toLowerCase().includes(aq)));
   const out = [['Date', 'Person', 'Team', 'Logged in', 'Logged out', 'Breaks', 'Break time (min)', 'Worked (h)', 'Late']];
   aPpl.forEach((p) => aDays.forEach((d) => {
@@ -401,12 +402,12 @@ export async function timeline({ mode = 'day', day, team }) {
   };
 }
 
-async function hoursLogData(RF) {
+async function hoursLogData(RF, pids = null) {
   const now = Date.now();
   const T = sod(now);
   const { isDay, day: rSel, rng } = resolveRange(RF, T);
   const rDays = workdays(rng, T).reverse();
-  const allPpl = await repo.people();
+  const allPpl = (await repo.people()).filter((p) => !pids || pids.includes(p.id));
   const rP = RF.person ? allPpl.find((p) => p.id === RF.person) : null;
   if (RF.person && !rP) throw notFound('Person');
   const rPpl = rP ? [rP] : allPpl;
@@ -459,8 +460,9 @@ export async function hoursLog(RF) {
   return { title, kpis, days, people };
 }
 
-export async function hoursLogCsv(RF) {
-  const { csv, T } = await hoursLogData(RF);
+/** `pids`: whose rows the caller may export (null = everyone). */
+export async function hoursLogCsv(RF, pids = null) {
+  const { csv, T } = await hoursLogData(RF, pids);
   return { rows: csv, name: `mariox-hours-${ymd(T)}.csv` };
 }
 

@@ -3,7 +3,8 @@ import { tx } from '../../db/mongo.js';
 import { CASE_INSENSITIVE } from '../../db/modelKit.js';
 import { Member, PpUser, Role, SalesOwner, User } from '../../db/models/index.js';
 import { PARTNER_ROLE, SUPER_ROLE } from '../../db/models/roles.js';
-import { HQ_SEAT_LABELS } from '../../db/models/users.js';
+import { HQ_ROLE_LABELS, LEGACY_HQ_SEATS, hqRoleOf } from '../../db/models/users.js';
+import { personIdFor } from '../hq/users/seats.js';
 import { config } from '../../config/index.js';
 import { nextId } from '../../core/ids.js';
 import { audit } from '../../core/audit.js';
@@ -84,15 +85,28 @@ function guardPartnerRole(newRole, oldRole = null) {
   }
 }
 
-/** Founders HQ access (docs/SSO.md): only a Super Admin sets it, never on client / partner accounts, one person per seat. */
-async function checkHqSeat(req, m, old, session) {
-  const before = old?.hq_seat ?? null;
-  if (m.hqSeat === before) return;
+/**
+ * Founders HQ access (docs/SSO.md): only a Super Admin sets it, never on client / partner accounts.
+ * Any number of Founders / Co-founders; each keeps one HQ person id (`hq_seat`) while they have
+ * access. Sets `m.hqSeat` (the id, or null) to store; `m.hqRole` is the wanted role.
+ * @param {string} userId the user being saved (new id on create)
+ */
+async function checkHqAccess(req, m, old, userId, session) {
+  const beforeSeat = old?.hq_seat ?? null;
+  const beforeRole = hqRoleOf(old);
+  const legacyClaim = m.hqSeatClaim !== undefined && m.hqSeatClaim !== beforeSeat;
+  if (m.hqRole === beforeRole && !legacyClaim) { m.hqSeat = beforeSeat; return; }
   if (!req.user.isSuper) throw forbidden('Only a Super Admin can change Founders HQ access');
-  if (!m.hqSeat) return;
+  if (!m.hqRole) { m.hqSeat = null; return; }
   if (m.role === 'r-client' || m.role === PARTNER_ROLE) throw unprocessable('Clients and partners can’t have Founders HQ access.');
-  const holder = await User.findOne({ hq_seat: m.hqSeat, ...(old ? { _id: { $ne: old.id } } : {}) }).select('name').session(session).rows();
-  if (holder) throw unprocessable(`The ${HQ_SEAT_LABELS[m.hqSeat]} seat is already taken by ${holder.name}.`);
+  if (legacyClaim && m.hqSeatClaim) {
+    // An old client asking for one of the two original seats by id: it must be free.
+    const holder = await User.findOne({ hq_seat: m.hqSeatClaim, _id: { $ne: userId } }).select('name').session(session).rows();
+    if (holder) throw unprocessable(`The ${HQ_ROLE_LABELS[LEGACY_HQ_SEATS[m.hqSeatClaim]]} seat is already taken by ${holder.name}.`);
+    m.hqSeat = m.hqSeatClaim;
+    return;
+  }
+  m.hqSeat = beforeSeat || await personIdFor(userId, session);
 }
 
 /** Same checks and messages as the frontend saveUser(). */
@@ -151,13 +165,20 @@ const norm = (b, prev = {}) => ({
   joinDate: b.joinDate !== undefined ? b.joinDate : prev.join_date ?? null,
   shiftHours: b.shiftHours ?? (prev.shift_hours != null ? Number(prev.shift_hours) : 8),
   clientOf: b.clientOf ?? prev.client_of ?? [],
-  hqSeat: b.hq_seat !== undefined ? b.hq_seat : prev.hq_seat ?? null,
+  // Founders HQ: `hq_role` ('founder' | 'cofounder' | null) is the field; `hq_seat` ('rahul' | 'saswat' |
+  // null) is still accepted from older clients and claims that original seat (null = no access).
+  hqRole: b.hq_role !== undefined ? b.hq_role
+    : b.hq_seat !== undefined ? (b.hq_seat ? LEGACY_HQ_SEATS[b.hq_seat] : null)
+      : hqRoleOf(prev),
+  hqSeatClaim: b.hq_role === undefined ? b.hq_seat : undefined,
+  hqSeat: prev.hq_seat ?? null,
   hue: prev.hue,
 });
 
 const userCols = (m) => ({
   name: m.name, email: m.email, phone: m.phone, title: m.title, role_id: m.role, dept: m.dept, reports_to: m.reportsTo,
   join_date: m.joinDate, shift_hours: m.shiftHours, client_of: m.role === 'r-client' ? m.clientOf : [], hq_seat: m.hqSeat,
+  hq_role: m.hqSeat ? m.hqRole : null,
 });
 
 /**
@@ -183,8 +204,8 @@ export async function create(req, body) {
   guardPartnerRole(m.role);
   const out = await tx(async (session) => {
     const role = await validateForm(m, null, session);
-    await checkHqSeat(req, m, null, session);
     const id = await nextId('user');
+    await checkHqAccess(req, m, null, id, session);
     const hue = randomHue();
     const { memberId, ownerId } = await syncPeople(session, { ...m, hue }, role, null);
     const invite = body.sendInvite ? newInvite() : null;
@@ -215,7 +236,7 @@ export async function update(req, id, body) {
     if (m.role !== old.role_id && await isLastSuperAdmin(id, session)) throw unprocessable('The last Super Admin’s role can’t be changed.');
     guardPartnerRole(m.role, old.role_id);
     const role = await validateForm(m, id, session);
-    await checkHqSeat(req, m, old, session);
+    await checkHqAccess(req, m, old, id, session);
     const { memberId, ownerId } = await syncPeople(session, m, role, old);
     await User.updateOne({ id }, { ...userCols(m), member_id: memberId, owner_id: ownerId }, { session });
     // The Mariox Partners profile shows the account's name and email.

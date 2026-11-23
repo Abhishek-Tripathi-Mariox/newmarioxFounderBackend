@@ -4,16 +4,15 @@ import { Role, User } from '../../db/models/index.js';
 import { nextId } from '../../core/ids.js';
 import { audit } from '../../core/audit.js';
 import { forbidden, notFound, unprocessable } from '../../core/errors.js';
-import { MODS, VIEW_EDIT_MODS } from './roles.schemas.js';
+import { PP_MODULES, clampCell, normalisePerms } from '../../core/permissions.js';
 
 /** Built-in locked roles (Super Admin, Partner) can't be edited or deleted. */
 const lockedMsg = (role) => `${role.name} is a locked system role`;
-const EMPTY_PERM = { v: false, c: false, e: false, d: false, scope: 'all' };
 const randomHue = () => Math.floor(Math.random() * 360);
 const iso = (d) => (d ? new Date(d).toISOString() : null);
 
 const toDto = (r) => ({
-  id: r.id, name: r.name, description: r.description, hue: r.hue, locked: r.locked, perms: r.perms,
+  id: r.id, name: r.name, description: r.description, hue: r.hue, locked: r.locked, perms: normalisePerms(r.perms),
   userCount: Number(r.user_count || 0), createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
 });
 
@@ -44,8 +43,6 @@ async function freeName(session, wanted) {
   if (!taken.has(wanted.toLowerCase())) return wanted;
   for (let i = 2; ; i++) if (!taken.has(`${wanted} ${i}`.toLowerCase())) return `${wanted} ${i}`;
 }
-
-const normalisePerms = (perms) => Object.fromEntries(MODS.map((m) => [m, { ...EMPTY_PERM, ...(perms?.[m] || {}) }]));
 
 /** New role with a copy of Team Member's permissions (frontend newRole). */
 export async function create(req, body) {
@@ -79,18 +76,22 @@ export async function duplicate(req, roleId) {
 /**
  * Apply a permission patch with the frontend toggle rules: turning View off clears Create/Edit/Delete,
  * turning any of Create/Edit/Delete on turns View on, and a scope can only be set while View is on.
- * View / Edit-only modules (`pp`) keep Create / Delete off.
+ * Actions a module doesn't have stay off; modules without a data scope stay 'all'. The legacy `pp`
+ * key patches every partner module (Edit = Create / Edit / Delete, as it allowed before).
  */
 export function applyPermPatch(current, patch) {
   const out = normalisePerms(current);
-  for (const [mod, p] of Object.entries(patch || {})) {
+  const entries = Object.entries(patch || {}).flatMap(([mod, p]) => {
+    if (mod !== 'pp') return [[mod, p]];
+    const legacy = { ...(p.v !== undefined ? { v: p.v } : {}), ...(p.e !== undefined ? { c: p.e, e: p.e, d: p.e } : {}) };
+    return PP_MODULES.map((m) => [m, legacy]);
+  });
+  for (const [mod, p] of entries) {
     const x = { ...out[mod], ...p };
     if (['c', 'e', 'd'].some((a) => p[a] === true)) x.v = true;
     else if (p.v === false) { x.c = false; x.e = false; x.d = false; }
     if (p.scope !== undefined && !x.v) throw unprocessable('Turn on View first');
-    // View / Edit-only modules have no Create, Delete or data scope.
-    if (VIEW_EDIT_MODS.includes(mod)) Object.assign(x, { c: false, d: false, scope: 'all' });
-    out[mod] = x;
+    out[mod] = clampCell(mod, x);
   }
   return out;
 }

@@ -4,21 +4,21 @@
  */
 import { LeadSource, LeadStage, Role, Service, Setting } from '../models/index.js';
 import { PARTNER_ROLE } from '../models/roles.js';
+import { MODS, clampCell } from '../../core/permissions.js';
 
-/** `pp` = Mariox Partners admin (View / Edit only): partner admins besides the Super Admin (docs/SSO.md). */
-const MODS = ['dash', 'leads', 'fu', 'projects', 'tasks', 'bugs', 'ts', 'team', 'users', 'att', 'tt', 'pp'];
-/** Attendance & reports is view-only. */
+/** Modules and their actions: src/core/permissions.js (pp_* = the Mariox Partners admin console sections). */
+/** Attendance & reports: View only by default (Edit = act on people's day). */
 const VIEW = (scope) => P(1, 0, 0, 0, scope);
 const P = (v, c, e, d, scope = 'all') => ({ v: !!v, c: !!c, e: !!e, d: !!d, scope });
 const NONE = P(0, 0, 0, 0);
 const ALL = P(1, 1, 1, 1);
 /** Team tasks: every staff role gives tasks down its "Reports to" team (Admin / Super Admin: anyone). */
 const TT = P(1, 1, 1, 1, 'team');
-const mk = (o) => Object.fromEntries(MODS.map((k) => [k, o[k] || (k === 'tt' ? TT : NONE)]));
+const mk = (o) => Object.fromEntries(MODS.map((k) => [k, clampCell(k, o[k] || (k === 'tt' ? TT : NONE))]));
 
 export const ROLES = [
   { id: 'r-super', name: 'Super Admin', description: 'Full access to everything, including roles', hue: 265, locked: true, perms: mk(Object.fromEntries(MODS.map((k) => [k, ALL]))) },
-  { id: 'r-admin', name: 'Admin', description: 'Everything except deleting users', hue: 220, perms: mk({ ...Object.fromEntries(MODS.map((k) => [k, ALL])), users: P(1, 1, 1, 0), att: VIEW('all'), pp: NONE }) },
+  { id: 'r-admin', name: 'Admin', description: 'Everything except deleting users', hue: 220, perms: mk({ ...Object.fromEntries(MODS.map((k) => [k, ALL])), users: P(1, 1, 1, 0), att: VIEW('all'), ...Object.fromEntries(MODS.filter((k) => k.startsWith('pp_')).map((k) => [k, NONE])) }) },
   { id: 'r-sm', name: 'Sales Manager', description: 'Owns the pipeline and the sales team', hue: 150, perms: mk({ dash: P(1), leads: ALL, fu: ALL, projects: P(1), att: VIEW('team') }) },
   { id: 'r-se', name: 'Sales Executive', description: 'Works their own leads and follow-ups', hue: 190, perms: mk({ dash: P(1, 0, 0, 0, 'own'), leads: P(1, 1, 1, 0, 'own'), fu: P(1, 1, 1, 1, 'own') }) },
   { id: 'r-pm', name: 'Project Manager', description: 'Runs projects, milestones, tasks and the team', hue: 300, perms: mk({ projects: P(1, 1, 1, 0), tasks: ALL, bugs: ALL, ts: P(1, 1, 1, 0), team: P(1, 0, 1, 0), fu: P(1, 1, 1, 0, 'own'), att: VIEW('team') }) },

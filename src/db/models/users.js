@@ -5,9 +5,29 @@ const uniqueWhenSet = (field) => [{ [field]: 1 }, { unique: true, partialFilterE
 
 export const USER_STATUSES = ['Active', 'Invited', 'Deactivated'];
 
-/** Founders HQ seats (values the HQ frontend uses), founder first: 'rahul' = Founder, 'saswat' = Co-founder. */
-export const HQ_SEATS = Object.freeze(['rahul', 'saswat']);
-export const HQ_SEAT_LABELS = Object.freeze({ rahul: 'Founder', saswat: 'Co-founder' });
+/**
+ * Founders HQ membership (docs/SSO.md "Founders HQ members"). Any number of people can be HQ members,
+ * each with a role and a stable HQ person id:
+ *   - `hq_seat`: the person id the HQ workspace uses for them (task owners, agreements, prefs …).
+ *     The two original seats keep their ids ('rahul', 'saswat') so existing workspace data stays
+ *     valid; anyone given access later gets an id derived from their user id (e.g. 'u-1b').
+ *   - `hq_role`: 'founder' | 'cofounder'. Older documents have no role: hqRoleOf() derives it
+ *     ('rahul' → founder, anyone else → co-founder) on read, and the next save stores it.
+ */
+export const HQ_ROLES = Object.freeze(['founder', 'cofounder']);
+export const HQ_ROLE_LABELS = Object.freeze({ founder: 'Founder', cofounder: 'Co-founder' });
+/** The original two seats → their role. They can still be claimed explicitly (old API clients). */
+export const LEGACY_HQ_SEATS = Object.freeze({ rahul: 'founder', saswat: 'cofounder' });
+/** HQ person ids: lowercase, start with a letter; values the HQ workspace uses for groups are reserved. */
+export const HQ_SEAT_RE = /^[a-z][a-z0-9-]{1,47}$/;
+const RESERVED_HQ_IDS = new Set(['both', 'team', 'all', 'any', 'none']);
+export const isHqSeatId = (v) => typeof v === 'string' && HQ_SEAT_RE.test(v) && !RESERVED_HQ_IDS.has(v);
+
+/** A user's effective HQ role (null without access), normalising documents saved before roles existed. */
+export const hqRoleOf = (u) => {
+  if (!u?.hq_seat) return null;
+  return HQ_ROLES.includes(u.hq_role) ? u.hq_role : (LEGACY_HQ_SEATS[u.hq_seat] || 'cofounder');
+};
 
 /** Portal accounts. `email` is citext: kept as typed, unique case-insensitively (query it with CASE_INSENSITIVE). */
 export const User = defineModel('users', {
@@ -32,7 +52,9 @@ export const User = defineModel('users', {
   invite_expires_at: ts(),
   reset_token_hash: text(),
   reset_expires_at: ts(),
-  hq_seat: oneOf(HQ_SEATS, null), // Founders HQ access (docs/SSO.md); set only by a Super Admin
+  // Founders HQ access (docs/SSO.md); set only by a Super Admin. hq_seat = HQ person id, unique when set.
+  hq_seat: { type: String, default: null, validate: { validator: (v) => v == null || isHqSeatId(v), message: 'Invalid Founders HQ person id' } },
+  hq_role: oneOf(HQ_ROLES, null),
   pp_user_id: text(), // → pp_users: the person's Mariox Partners profile (partner, or partner-admin profile)
 }, {
   indexes: [

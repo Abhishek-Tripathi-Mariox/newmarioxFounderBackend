@@ -134,6 +134,9 @@ export function reportLines(r, projectName) {
     if (r.done) L.push(['Completed', r.done]);
     (r.pm_rows || []).forEach((x) => L.push([projectName(x.p) || 'Project', x.st + (x.note ? ` · ${x.note}` : '')]));
   }
+  if ((r.team_tasks || []).length) {
+    L.push(['Team tasks', r.team_tasks.map((x) => `${x.done ? '✓ ' : ''}${x.title}${x.h ? ` ${x.h}h` : ''}${x.note ? ` (${x.note})` : ''}`).join(' · ')]);
+  }
   if (r.blockers) L.push(['Blockers', r.blockers]);
   if (r.plan) L.push(['Tomorrow', r.plan]);
   return L.map(([k, v]) => ({ k, v }));

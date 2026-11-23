@@ -4,6 +4,7 @@ import { storage } from '../../../core/storage/index.js';
 import { replacePassword, revokeSessions } from '../../auth/auth.service.js';
 import { removeUser } from '../../users/users.repository.js';
 import { PpError } from '../lib/http.js';
+import { adminMay } from '../lib/session.js';
 import { eq, runList } from '../lib/list.js';
 import { PORTAL_STATUS, createPartner, emailInvite, emailTaken, emailWelcome, newInvite, portalUserOf, publicUser } from '../lib/users.js';
 
@@ -22,9 +23,19 @@ const LIST = {
   filters: { status: eq('status'), source: eq('source'), role: eq('role') },
 };
 
+/** What a partner picker needs (admins who see partner leads / projects but not the Partners section). */
+const PICKER_FIELDS = ['id', 'name', 'company', 'partnerCode', 'commissionRate', 'status', 'role'];
+
 export async function list(req) {
-  const { items, meta } = await runList(PpUser, {}, req, LIST);
-  return { users: items.map(publicUser), meta };
+  const full = adminMay(req.pp, 'pp_partners', 'v');
+  if (!full && !adminMay(req.pp, 'pp_leads', 'v') && !adminMay(req.pp, 'pp_projects', 'v')) {
+    throw new PpError(403, 'Your role can’t view partners in Mariox Partners');
+  }
+  const { items, meta } = full
+    ? await runList(PpUser, {}, req, LIST)
+    : await runList(PpUser, { role: 'partner' }, req, { ...LIST, search: ['name', 'company', 'partnerCode'] });
+  const users = items.map(publicUser);
+  return { users: full ? users : users.map((u) => Object.fromEntries(PICKER_FIELDS.map((k) => [k, u[k]]))), meta };
 }
 
 export async function find(id) {

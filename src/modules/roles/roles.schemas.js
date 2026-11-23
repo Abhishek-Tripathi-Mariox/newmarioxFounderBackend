@@ -1,12 +1,14 @@
 import { z } from 'zod';
 
-/** `tt` = Team tasks: All = every task / give to anyone, Team = self + people who report to them, Own = own tasks only. */
-/** `att` = Attendance & reports (view only): All = everyone, Team = self + people who report to them, Own = self. */
-/** `pp` = Mariox Partners admin: View opens /partners/admin, Edit changes partners (no Create / Delete / scope). */
-export const MODS = ['dash', 'leads', 'fu', 'projects', 'tasks', 'bugs', 'ts', 'team', 'users', 'att', 'tt', 'pp'];
+import { MODS } from '../../core/permissions.js';
 
-/** Modules whose permission is View / Edit only. */
-export const VIEW_EDIT_MODS = ['pp'];
+/**
+ * Permission modules (src/core/permissions.js has the list, which actions each one has and which
+ * have a data scope). `pp` = the old single Mariox Partners switch, still accepted in a patch: it
+ * applies to every partner module (View → View, Edit → Create / Edit / Delete).
+ */
+export { MODS };
+const PATCH_MODS = [...MODS, 'pp'];
 
 export const roleIdParams = z.object({ id: z.string().regex(/^r-[a-z0-9-]{1,40}$/i, 'Invalid role id') });
 
@@ -28,5 +30,5 @@ export const updateRoleSchema = z.object({
   name: z.string().trim().min(1, 'Enter a role name.').max(60).optional(),
   description: z.string().trim().max(200).optional(),
   hue: z.number().int().min(0).max(360).optional(),
-  perms: z.partialRecord(z.enum(MODS), cell).optional(),
+  perms: z.partialRecord(z.enum(PATCH_MODS), cell).optional(),
 });

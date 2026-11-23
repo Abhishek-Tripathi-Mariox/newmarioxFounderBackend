@@ -1,5 +1,6 @@
 import { openFile, recordFiles } from '../lib/files.js';
 import { PpError } from '../lib/http.js';
+import { adminMay } from '../lib/session.js';
 
 /** Partner-portal uploads (mariox-saas src/app/api/uploads/**). */
 
@@ -9,9 +10,16 @@ export async function saveUploads(s, files) {
   return recordFiles(files, s.sub);
 }
 
-/** A file the caller may read: admins, the uploader, or anyone when shared (visible kit files). */
+/** Sections whose pages show partners' files (request attachments, kit files). */
+const FILE_SECTIONS = ['pp_requests', 'pp_partners', 'pp_kit', 'pp_leads', 'pp_projects'];
+
+/**
+ * A file the caller may read: the uploader, anyone when shared (visible kit files), and admins whose
+ * role can view a section that shows files.
+ */
 export async function readable(s, id) {
   const f = await openFile(id);
-  if (s.role !== 'admin' && !f.shared && String(f.owner) !== s.sub) throw new PpError(404, 'File not found');
+  const admin = FILE_SECTIONS.some((m) => adminMay(s, m, 'v'));
+  if (!admin && !f.shared && String(f.owner) !== s.sub) throw new PpError(404, 'File not found');
   return f;
 }

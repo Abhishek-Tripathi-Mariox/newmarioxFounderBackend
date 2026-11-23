@@ -10,6 +10,7 @@ import { nextId } from '../../core/ids.js';
 import { peopleScope, visibleProjectIds } from '../../core/scope.js';
 import { notFound, conflict, unprocessable } from '../../core/errors.js';
 import * as repo from './workday.repository.js';
+import * as teamTasks from '../team-tasks/teamTasks.service.js';
 import { events } from './state.repository.js';
 import { sumDay, EVL } from './attendance.domain.js';
 import { MINUTE, HOUR, sod, addDays, ymd, clock, fmtDur, fmtDate, iso } from './time.js';
@@ -215,6 +216,11 @@ export async function endShiftForm(user) {
     },
     shift: user.shiftHours, workedHours: st.s.work / HOUR, workedLabel: fmtDur(st.s.work), checkedIn: st.checkedIn,
   };
+  // Team tasks (not project tasks): the person's open / today's ones, plus others they may complete.
+  const tt = await teamTasks.shiftTasks(user, T);
+  form.teamTasksEnabled = tt.enabled;
+  form.teamTasks = tt.rows.map((x) => ({ ...x, done: x.status === 'Done', h: '', note: '' }));
+  form.teamTaskOptions = tt.options;
   if (sales) {
     const acts = (await repo.leadActsSince(T)).filter((x) => x.owner === pid);
     const own = acts.filter((x) => !x.fromFeed);
@@ -328,6 +334,16 @@ async function applyLeadRows(user, rows, now, session = null) {
   return made;
 }
 
+/** Team task rows worth recording (ticked, hours or a note), one per task (the last one wins). */
+function shiftTaskRows(list) {
+  const byId = new Map();
+  (list || []).forEach((r) => {
+    const x = { id: r.id, done: !!r.done, h: Math.round((+r.h || 0) * 100) / 100, note: (r.note || '').trim() };
+    if (x.done || x.h > 0 || x.note) byId.set(x.id, x);
+  });
+  return [...byId.values()];
+}
+
 /**
  * Submit the end-of-shift report (frontend submitEndShift). Logged hours may not exceed time
  * worked today (attendance). Replaces today's time logs with the report rows, upserts the
@@ -343,16 +359,26 @@ export async function submitEndShift(user, m) {
     const sales = await isSalesPerson(pid, session);
     let rows = [];
     let ms = [];
-    const internal = (m.internalRows || []).filter((r) => +r.h > 0);
+    let internal = (m.internalRows || []).filter((r) => +r.h > 0);
+    const blankInternal = internal.findIndex((r) => !(r.note || '').trim());
+    // Team tasks reported: checked (visible, completable) before any write.
+    const ttChecked = await teamTasks.checkShiftTasks(user, shiftTaskRows(m.teamTaskRows), session);
+    const ttLine = (x) => `Team task ${x.id}: ${x.row.title}${x.note ? ` — ${x.note}` : ''}`;
+    // Hours on a project-linked team task go to that project's timesheet; the rest (and all of a sales person's) is internal work.
+    const ttProject = sales ? [] : ttChecked.filter((x) => x.h > 0 && x.row.project_id);
+    const ttInternal = ttChecked.filter((x) => x.h > 0 && !ttProject.includes(x));
+    const completedTitles = ttChecked.filter((x) => x.done).map((x) => x.row.title);
+    internal = internal.concat(ttInternal.map((x) => ({ cat: 'Team task', h: x.h, note: ttLine(x), tt: x.id })));
+    const done = m.done.trim() || (completedTitles.length ? `Completed team tasks: ${completedTitles.join('; ')}` : '');
     if (!sales) {
-      rows = (m.rows || []).filter((r) => r.p && +r.h > 0);
+      rows = (m.rows || []).filter((r) => r.p && +r.h > 0)
+        .concat(ttProject.map((x) => ({ p: x.row.project_id, ms: null, h: x.h, note: ttLine(x), tt: x.id })));
       if (!rows.length && !internal.length) throw unprocessable('Add hours for at least one project or internal work.');
-      const blank = internal.findIndex((r) => !(r.note || '').trim());
-      if (blank >= 0) throw unprocessable(`Describe the internal work you did (row ${blank + 1}).`);
+      if (blankInternal >= 0) throw unprocessable(`Describe the internal work you did (row ${blankInternal + 1}).`);
       const lt = rows.reduce((x, r) => x + +r.h, 0) + internal.reduce((x, r) => x + +r.h, 0);
       const wh = st.s.work / HOUR;
       if (lt > wh + 0.01) throw unprocessable(`Logged ${Math.round(lt * 100) / 100}h but you worked ${fmtDur(wh * HOUR)}. Reduce hours to match time worked.`);
-      if (!m.done.trim()) throw unprocessable('Write what you completed today.');
+      if (!done) throw unprocessable('Write what you completed today.');
       const pids = [...new Set(rows.map((r) => r.p))];
       const known = await repo.existingProjectIds(pids, session);
       const unknown = pids.filter((p) => !known.includes(p));
@@ -360,8 +386,7 @@ export async function submitEndShift(user, m) {
       ms = await repo.milestonesOf(pids, session);
     } else {
       if (!m.outcome.trim()) throw unprocessable('Write a short summary of your day.');
-      const blank = internal.findIndex((r) => !(r.note || '').trim());
-      if (blank >= 0) throw unprocessable(`Describe the internal work you did (row ${blank + 1}).`);
+      if (blankInternal >= 0) throw unprocessable(`Describe the internal work you did (row ${blankInternal + 1}).`);
       const ih = internal.reduce((x, r) => x + +r.h, 0);
       if (ih > st.s.work / HOUR + 0.01) throw unprocessable(`Internal work is ${Math.round(ih * 100) / 100}h but you worked ${fmtDur(st.s.work)}. Reduce the hours.`);
     }
@@ -371,10 +396,14 @@ export async function submitEndShift(user, m) {
     const msOk = (r) => r.ms && ms.some((x) => x.id === r.ms && x.project_id === r.p);
     const repRows = rows.map((r) => {
       const h = Math.round(+r.h * 4) / 4 || Math.round(+r.h * 100) / 100;
-      return { p: r.p, ms: msOk(r) ? r.ms : curMs(ms, r.p), h, note: (r.note || '').trim() };
+      return { p: r.p, ms: msOk(r) ? r.ms : curMs(ms, r.p), h, note: (r.note || '').trim(), ...(r.tt ? { tt: r.tt } : {}) };
     });
     const pmRows = (m.pmRows || []).map((x) => ({ p: x.p, st: x.st, note: (x.note || '').trim() }));
-    const internalRows = internal.map((r) => ({ cat: (r.cat || 'Other').trim() || 'Other', h: Math.round(+r.h * 100) / 100, note: (r.note || '').trim() }));
+    const internalRows = internal.map((r) => ({ cat: (r.cat || 'Other').trim() || 'Other', h: Math.round(+r.h * 100) / 100, note: (r.note || '').trim(), ...(r.tt ? { tt: r.tt } : {}) }));
+    const ttReport = ttChecked.map((x) => ({
+      id: x.id, title: x.row.title, done: !!x.done, was: x.row.status, h: x.h, note: x.note, p: x.row.project_id || null,
+      to: !(x.h > 0) ? null : ttProject.includes(x) ? 'timesheet' : 'internal',
+    }));
 
     // Check out first (ends a break, stops & logs the timer) — then today's logs are replaced.
     const t = now;
@@ -391,15 +420,19 @@ export async function submitEndShift(user, m) {
       }
     }
     await repo.upsertReport({
-      person_id: pid, day, is_sales: sales, done: m.done.trim(), blockers: m.blockers.trim(), plan: m.plan.trim(), outcome: m.outcome.trim(),
+      person_id: pid, day, is_sales: sales, done, blockers: m.blockers.trim(), plan: m.plan.trim(), outcome: m.outcome.trim(),
       calls: +m.calls || 0, meetings: +m.meetings || 0, rows: repRows, pm_rows: pmRows, internal_rows: internalRows, submitted_at: new Date(now),
-      lead_rows: leadRows.map(({ company, ...r }) => ({ ...r, company })),
+      lead_rows: leadRows.map(({ company, ...r }) => ({ ...r, company })), team_tasks: ttReport,
     }, session);
     const fuMade = sales ? await applyLeadRows(user, leadRows, now, session) : 0;
+    // The report is saved; now the ticked team tasks become Done (same rules and timeline as the Team tasks page).
+    const ttDone = await teamTasks.applyShiftTasks(user, ttChecked, day, session);
+    for (const id of ttDone) await repo.feed(pid, 'task', `Completed team task · ${ttChecked.find((x) => x.id === id).row.title}`, t + 2, null, session);
     await repo.touchPresence(pid, now, session);
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     return {
-      message: `Report submitted · shift ended${fuMade ? ` · ${fuMade} follow-up${fuMade === 1 ? '' : 's'} scheduled` : ''}`,
-      report: { who: pid, day, sales, done: m.done.trim(), blockers: m.blockers.trim(), plan: m.plan.trim(), outcome: m.outcome.trim(), calls: +m.calls || 0, meetings: +m.meetings || 0, rows: repRows, pmRows, internal: internalRows, leadRows },
+      message: `Report submitted · shift ended${ttDone.length ? ` · ${plural(ttDone.length, 'team task')} done` : ''}${fuMade ? ` · ${plural(fuMade, 'follow-up')} scheduled` : ''}`,
+      report: { who: pid, day, sales, done, blockers: m.blockers.trim(), plan: m.plan.trim(), outcome: m.outcome.trim(), calls: +m.calls || 0, meetings: +m.meetings || 0, rows: repRows, pmRows, internal: internalRows, leadRows, teamTasks: ttReport },
     };
   }));
 }

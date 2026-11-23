@@ -6,7 +6,7 @@ import { TEXT_ORDER, ilike } from '../../db/modelKit.js';
 
 /** Columns of a user row as the API reads them (never the password / token hashes). */
 const USER_FIELDS = ['_id', 'name', 'email', 'phone', 'title', 'role_id', 'dept', 'reports_to', 'join_date', 'status', 'invited_at',
-  'last_active_at', 'hue', 'member_id', 'owner_id', 'client_of', 'shift_hours', 'hq_seat', 'pp_user_id', 'created_at', 'updated_at'];
+  'last_active_at', 'hue', 'member_id', 'owner_id', 'client_of', 'shift_hours', 'hq_seat', 'hq_role', 'pp_user_id', 'created_at', 'updated_at'];
 
 /** Default list order like the frontend: Active → Invited → Deactivated. */
 const STATUS_RANK = { $switch: { branches: [{ case: { $eq: ['$status', 'Active'] }, then: 0 }, { case: { $eq: ['$status', 'Invited'] }, then: 1 }], default: 2 } };

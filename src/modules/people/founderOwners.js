@@ -1,5 +1,5 @@
 /**
- * Founders as lead owners. The Founder and the Co-founder (users with an `hq_seat`) own and assign
+ * Founders as lead owners. Founders and Co-founders (users with an `hq_seat`, any number) own and assign
  * leads like the sales team, so each gets a sales-owner profile (`sales_owners`, `founder: true`)
  * linked through `users.owner_id`. It is created when the seat is given (Users & roles, Founders HQ
  * Accounts), by the seed, and on first need (sign-in, the sales-owner list), and its name follows the
@@ -9,7 +9,6 @@
  */
 import { nextId } from '../../core/ids.js';
 import { SalesOwner, User } from '../../db/models/index.js';
-import { HQ_SEATS } from '../../db/models/users.js';
 
 const randomHue = () => Math.floor(Math.random() * 360);
 
@@ -46,6 +45,6 @@ export async function ensureFounderOwner(userId, session = null) {
 
 /** ensureFounderOwner for every seat holder still without a sales-owner profile (cheap when none). */
 export async function ensureFounderOwners(session = null) {
-  const missing = await User.find({ hq_seat: { $in: HQ_SEATS }, owner_id: null }).select('_id').session(session).rows();
+  const missing = await User.find({ hq_seat: { $type: 'string' }, owner_id: null }).select('_id').session(session).rows();
   for (const u of missing) await ensureFounderOwner(u.id, session);
 }

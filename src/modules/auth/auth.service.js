@@ -7,6 +7,7 @@ import { unauthorized, unprocessable } from '../../core/errors.js';
 import { signAccessToken, newRefreshToken, hashToken } from '../../core/tokens.js';
 import { loadPrincipal } from '../../middleware/authenticate.js';
 import { can } from '../../middleware/authorize.js';
+import { canPartnerAdmin } from '../../core/permissions.js';
 
 const INVALID = 'Invalid email or password';
 
@@ -19,13 +20,14 @@ const PORTAL_LANDING = [
 
 /**
  * Which areas the person can open (docs/SSO.md "What each area accepts"): the internal portal,
- * Mariox Partners (as admin or partner) and Founders HQ (their seat).
+ * Mariox Partners (as admin or partner) and Founders HQ (their HQ person id; `foundersRole` is their
+ * role there, 'founder' | 'cofounder').
  */
 export function appsOf(p) {
   let partners = null;
   if (p.isPartner) partners = p.ppUserId ? 'partner' : null;
-  else if (can(p, 'pp', 'v')) partners = 'admin';
-  return { portal: !p.isPartner, partners, founders: p.hqSeat || null };
+  else if (canPartnerAdmin(p)) partners = 'admin'; // any partner admin section (pp_*) viewable
+  return { portal: !p.isPartner, partners, founders: p.hqSeat || null, foundersRole: p.hqSeat ? p.hqRole || 'cofounder' : null };
 }
 
 /** Where to land after sign-in (the frontend applies a same-site `?next=` first). */
@@ -33,7 +35,10 @@ export function homeOf(p, apps = appsOf(p)) {
   if (p.isPartner) return '/partners/dashboard';
   if (apps.founders) return '/founders';
   if (p.isSuper) return '/live';
-  return PORTAL_LANDING.find(([mod]) => can(p, mod, 'v'))?.[1] || '/live';
+  const portal = PORTAL_LANDING.find(([mod]) => can(p, mod, 'v'))?.[1];
+  // Partner admins with nothing to open in the portal land in the partner admin console.
+  if (!portal && apps.partners === 'admin') return '/partners/admin';
+  return portal || '/live';
 }
 
 /** Principal → the user object the frontend keeps for the session. */

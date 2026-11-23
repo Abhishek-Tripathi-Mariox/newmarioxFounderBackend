@@ -393,3 +393,82 @@ export async function comment(id, text, user) {
   await logEvent(id, user, 'comment', { text: text.trim() });
   return activity(id, user);
 }
+
+/* ───────────── End-of-shift report (workday.service.submitEndShift) ───────────── */
+
+/**
+ * Team tasks for the End shift form: `rows` = the person's own open tasks, their tasks finished
+ * today and tasks they changed today (the ones they can update); `options` = other open tasks
+ * they can see and may complete ("+ Add task"). `since` = start of today. Without Team tasks →
+ * View the section is off (`enabled: false`).
+ */
+export async function shiftTasks(user, since) {
+  if (user.role?.id === 'r-client' || !ttPerm(user).v) return { enabled: false, rows: [], options: [] };
+  const team = await teamIds(user);
+  const from = new Date(since);
+  const changed = await TeamTaskEvent.distinct('task_id', { user_id: user.id, created_at: { $gte: from } });
+  const found = await TeamTask.find({
+    $and: [scoped(user, team), { $or: [{ status: { $ne: 'Done' } }, { done_at: { $gte: from } }, { id: { $in: changed } }] }],
+  }).sort({ updated_at: -1, _id: -1 }).limit(500).rows();
+  const rows = await withNames(found);
+  const dto = (r) => {
+    const d = toDto(r, user, team);
+    return {
+      id: d.id, title: d.title, status: d.status, priority: d.priority, dueDate: d.dueDate,
+      projectId: d.projectId, projectName: d.projectName, leadName: d.leadName, assigneeId: d.assigneeId, assigneeName: d.assigneeName,
+      mine: d.assigneeId === user.id, doneToday: d.status === 'Done', canComplete: d.canUpdateStatus,
+    };
+  };
+  const all = rows.map(dto).filter((x) => x.canComplete);
+  const dueKey = (x) => x.dueDate || '9999-99-99';
+  const listed = all.filter((x) => (x.mine && (x.status !== 'Done' || x.doneToday)) || changed.includes(x.id))
+    .filter((x) => x.status !== 'Done' || found.find((r) => r.id === x.id).done_at >= from)
+    .sort((a, b) => (a.status === 'Done') - (b.status === 'Done') || dueKey(a).localeCompare(dueKey(b)) || a.title.localeCompare(b.title));
+  const ids = new Set(listed.map((x) => x.id));
+  const options = all.filter((x) => !ids.has(x.id) && x.status !== 'Done').sort((a, b) => a.title.localeCompare(b.title));
+  return { enabled: true, rows: listed, options };
+}
+
+/**
+ * Validate the team tasks of an end-of-shift report before anything is written: each must be
+ * a task the person can see, and a ticked one must be one they may complete (same rule as the
+ * Team tasks page: the assignee, or a manager with Edit). → [{ id, done, h, note, row }].
+ */
+export async function checkShiftTasks(user, items, session = null) {
+  if (!items.length) return [];
+  if (user.role?.id === 'r-client' || !ttPerm(user).v) throw forbidden('Your role can’t open Team tasks.');
+  const team = await teamIds(user);
+  const ids = [...new Set(items.map((x) => x.id))];
+  const found = await TeamTask.find({ $and: [{ id: { $in: ids } }, scoped(user, team)] }).session(session).rows();
+  const named = new Map((await withNames(found, session)).map((r) => [r.id, r]));
+  return items.map((x) => {
+    const row = named.get(x.id);
+    if (!row) throw unprocessable(`Team task ${x.id} isn’t available any more — remove it from the report.`);
+    if (x.done && row.status !== 'Done' && !toDto(row, user, team).canUpdateStatus) throw unprocessable(`You can’t mark “${row.title}” as done.`);
+    return { ...x, row };
+  });
+}
+
+/**
+ * Apply the checked team tasks of a submitted report (inside its transaction): ticked tasks
+ * become Done (conditional update, so a second submit changes nothing) with a status event that
+ * says it came from the end-of-shift report; hours / notes on other tasks add one 'shift-report'
+ * event per task per day (none when that day's report already recorded the task). Returns the
+ * ids completed now.
+ */
+export async function applyShiftTasks(user, checked, day, session = null) {
+  const completed = [];
+  for (const x of checked) {
+    const meta = { via: 'shift-report', day, hours: x.h || 0 };
+    if (x.done && x.row.status !== 'Done') {
+      const res = await TeamTask.updateOne({ id: x.id, status: { $ne: 'Done' } }, { status: 'Done', done_at: new Date() }, { session });
+      if (res.modifiedCount) {
+        await logEvent(x.id, user, 'status', { from: x.row.status, to: 'Done', text: x.note || null, meta }, session);
+        completed.push(x.id);
+      }
+    } else if ((x.h > 0 || x.note) && !(await TeamTaskEvent.exists({ task_id: x.id, user_id: user.id, 'meta.via': 'shift-report', 'meta.day': day }).session(session))) {
+      await logEvent(x.id, user, 'shift-report', { text: x.note || null, meta: { ...meta, done: !!x.done } }, session);
+    }
+  }
+  return completed;
+}

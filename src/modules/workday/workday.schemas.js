@@ -35,6 +35,12 @@ export const endShiftSchema = z.object({
     note: text(1000),
     next: z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD'), z.literal(''), z.null()]).optional().transform((v) => v || ''),
   })).max(100).optional().default([]),
+  teamTaskRows: z.array(z.object({
+    id: z.string().regex(/^TT\d{1,9}$/, 'Pick a team task'),
+    done: z.union([z.boolean(), z.enum(['true', 'false'])]).optional().transform((v) => v === true || v === 'true'),
+    h: hours,
+    note: text(1000),
+  })).max(50).optional().default([]),
   pmRows: z.array(z.object({
     p: z.string().min(1).max(40),
     st: z.enum(['On track', 'At risk', 'Blocked']).default('On track'),

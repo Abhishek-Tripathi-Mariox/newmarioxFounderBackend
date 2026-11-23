@@ -2,7 +2,8 @@
  * Founders HQ founder seat (HQ_FOUNDER_EMAIL / HQ_FOUNDER_PASSWORD / HQ_FOUNDER_NAME), optional.
  *
  * With the one login (docs/SSO.md) the founder is a Mariox One Super Admin holding the Founder seat
- * (`users.hq_seat = 'rahul'`):
+ * (`users.hq_seat = 'rahul'`, the original Founder person id, `hq_role = 'founder'`). More founders and
+ * co-founders are added later (Users & roles, or the HQ Accounts dialog):
  *   - HQ_FOUNDER_EMAIL is an existing Super Admin (e.g. the same person as SUPER_ADMIN_EMAIL) → that
  *     account gets the seat;
  *   - nobody uses the email → a new Super Admin "Founder" with the seat is created (empty password =
@@ -18,7 +19,7 @@ import { nextId } from '../../core/ids.js';
 import { CASE_INSENSITIVE } from '../modelKit.js';
 import { User } from '../models/index.js';
 import { SUPER_ROLE } from '../models/roles.js';
-import { HQ_SEAT_LABELS } from '../models/users.js';
+import { HQ_ROLE_LABELS } from '../models/users.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FOUNDER_SEAT = 'rahul';
@@ -52,7 +53,7 @@ export async function createFounder({
   const existing = await User.findOne({ email: address }).collation(CASE_INSENSITIVE).select('email role_id').rows();
   if (existing) {
     if (existing.role_id !== SUPER_ROLE) throw new Error(`${LABEL}: ${existing.email} is not a Super Admin, so it can't hold the Founder seat.`);
-    await User.updateOne({ id: existing.id, hq_seat: null }, { hq_seat: FOUNDER_SEAT });
+    await User.updateOne({ id: existing.id, hq_seat: null }, { hq_seat: FOUNDER_SEAT, hq_role: 'founder' });
     log(`${LABEL} seed: gave ${existing.email} the Founder seat.`);
     return { seated: true, created: false, user: existing };
   }
@@ -62,13 +63,14 @@ export async function createFounder({
     id: await nextId('user'),
     name: String(name).trim() || 'Founder',
     email: address,
-    title: HQ_SEAT_LABELS[FOUNDER_SEAT],
+    title: HQ_ROLE_LABELS.founder,
     role_id: SUPER_ROLE,
     dept: 'Management',
     join_date: new Date().toISOString().slice(0, 10),
     status: 'Active',
     password_hash: await bcrypt.hash(pw, rounds),
     hq_seat: FOUNDER_SEAT,
+    hq_role: 'founder',
   }]);
   log(`${LABEL} seed: created Super Admin ${address} with the Founder seat${password ? '' : ` and generated password: ${pw}  (change it after first sign-in)`}`);
   return { seated: true, created: true, user, password: password ? undefined : pw };

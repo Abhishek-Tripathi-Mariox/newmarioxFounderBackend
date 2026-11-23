@@ -8,7 +8,7 @@ let app;
 beforeEach(async () => {
   await resetHqDb();
   app = makeApp();
-  await createTestUser({ email: EMAIL });
+  await createTestUser({ email: EMAIL, seat: 'rahul' }); // the original Founder seat
 });
 afterAll(closeDb);
 
@@ -39,10 +39,11 @@ describe('session', () => {
     const res = await agent.get(`${HQ}/auth/me`);
     expect(res.status).toBe(200);
     const { user } = res.body.data;
-    expect(Object.keys(user).sort()).toEqual(['createdAt', 'email', 'id', 'lastLoginAt', 'name', 'seat', 'seatLabel']);
+    expect(Object.keys(user).sort()).toEqual(['createdAt', 'email', 'id', 'lastLoginAt', 'name', 'role', 'seat', 'seatLabel', 'userId']);
     expect(user.email).toBe(EMAIL);
     expect(user.seat).toBe('rahul');
     expect(user.seatLabel).toBe('Founder');
+    expect(user.role).toBe('founder');
     expect(Date.parse(user.lastLoginAt)).toBeTruthy();
     expect(user.passwordHash).toBeUndefined();
   });

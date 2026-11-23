@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SEATS } from './seats.js';
+import { HQ_ROLES, LEGACY_SEATS } from './seats.js';
 
 export const objectId = z.string({ error: 'An id is required.' }).regex(/^[a-f\d]{24}$/i, { error: 'That id is not valid.' });
 
@@ -27,11 +27,18 @@ export const createUserBody = z.object({
   name: nameField,
   email: emailField,
   password: newPasswordField,
-  seat: z.enum(SEATS, { error: `Seat must be one of: ${SEATS.join(', ')}.` }).optional(),
+  /** 'founder' | 'cofounder' (any number of each); default: founder for the first member, else co-founder. */
+  role: z.enum(HQ_ROLES, { error: `Role must be one of: ${HQ_ROLES.join(', ')}.` }).optional(),
+  /** Older clients: one of the two original person ids, which must be free. */
+  seat: z.enum(LEGACY_SEATS, { error: `Seat must be one of: ${LEGACY_SEATS.join(', ')}.` }).optional(),
 });
 
 export const updateUserBody = z
-  .object({ name: nameField.optional(), email: emailField.optional() })
-  .refine((body) => body.name !== undefined || body.email !== undefined, { error: 'Send a new name or email to update.' });
+  .object({
+    name: nameField.optional(),
+    email: emailField.optional(),
+    role: z.enum(HQ_ROLES, { error: `Role must be one of: ${HQ_ROLES.join(', ')}.` }).optional(),
+  })
+  .refine((body) => body.name !== undefined || body.email !== undefined || body.role !== undefined, { error: 'Send a new name or email to update.' });
 
 export const setPasswordBody = z.object({ password: newPasswordField });

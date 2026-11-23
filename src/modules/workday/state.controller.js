@@ -1,6 +1,7 @@
 import { ok } from '../../core/http.js';
 import * as state from './state.service.js';
 import { forbidden, unprocessable } from '../../core/errors.js';
+import { can } from '../../middleware/authorize.js';
 
 /**
  * Whose raw workday data the caller may read: null = everyone (signed-in Super Admin, not
@@ -20,8 +21,15 @@ export function scopePids(req, person) {
   return mine;
 }
 
-/** Own live state only (the header's check-in / break / timer controls). */
-export const liveState = async (req, res) => ok(res, await state.liveState(scopePids(req, req.user.isSuper && !req.previewing ? undefined : req.user.pid)));
+/**
+ * Live state: the Super Admin's whole team; a role with "Attendance & reports" Edit gets the people
+ * in its scope (to check them in / out from Attendance); everyone else only their own (the header's
+ * check-in / break / timer controls).
+ */
+export const liveState = async (req, res) => {
+  const team = req.user.isSuper ? !req.previewing : can(req.user, 'att', 'e');
+  ok(res, await state.liveState(scopePids(req, team ? undefined : req.user.pid)));
+};
 
 export const attendanceEvents = async (req, res) => {
   const { from, to, person } = req.valid.query;

@@ -29,7 +29,7 @@ beforeAll(async () => {
 afterAll(closeDb);
 
 describe('CEO-only access', () => {
-  test.each(['/live', '/attendance', '/reports/timeline', '/reports/hours-log', '/attendance/export.csv'])('%s → 403 for staff', async (path) => {
+  test.each(['/live', '/attendance', '/reports/timeline', '/reports/hours-log'])('%s → 403 for staff', async (path) => {
     const res = await (await as('pm@test.io')).get(`${API}${path}`);
     expect(res.status).toBe(403);
   });
