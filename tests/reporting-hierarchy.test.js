@@ -1,0 +1,69 @@
+import { AttendanceEvent, Role, ShiftReport, User } from '../src/db/models/index.js';
+import { resetDb, as, closeDb } from './helpers.js';
+import { sod, ymd } from '../src/modules/workday/time.js';
+
+const API = '/api/v1';
+const TODAY = ymd(sod(Date.now()));
+
+beforeAll(async () => {
+  await resetDb();
+  // vg (dev) reports to mj (PM); si reports to vg → mj sees vg and si, vg sees si.
+  await User.updateOne({ id: 'u-vg' }, { reports_to: 'u-mj' });
+  await User.updateOne({ id: 'u-si' }, { reports_to: 'u-vg' });
+  const at = new Date();
+  await AttendanceEvent.insertMany(['mj', 'vg', 'si', 'dn'].map((p) => ({ person_id: p, kind: 'login', at })));
+  await ShiftReport.insertMany(['vg', 'si', 'dn'].map((p) => ({
+    person_id: p, day: TODAY, is_sales: false, done: `${p} work`, blockers: '', plan: '', outcome: '', calls: 0, meetings: 0,
+    rows: [], pm_rows: [], internal_rows: [{ cat: 'Learning', h: 1, note: `${p} internal` }], submitted_at: at,
+  })));
+});
+afterAll(closeDb);
+
+const whos = (rows, k) => [...new Set(rows.map((r) => r[k]))].sort();
+
+describe('"Reports to" hierarchy', () => {
+  test('session user lists everyone below them (direct + indirect)', async () => {
+    const me = (await (await as('pm@test.io')).get(`${API}/auth/me`)).body.data;
+    expect(me.reportees.map((r) => r.pid).sort()).toEqual(['si', 'vg']);
+    const dev = (await (await as('dev@test.io')).get(`${API}/auth/me`)).body.data;
+    expect(dev.reportees.map((r) => r.pid)).toEqual(['si']);
+    const qa = (await (await as('qa@test.io')).get(`${API}/auth/me`)).body.data;
+    expect(qa.reportees).toEqual([]);
+  });
+
+  test('manager sees own + team attendance and shift reports (with internal work)', async () => {
+    const pm = await as('pm@test.io');
+    const ev = (await pm.get(`${API}/attendance/events?from=${TODAY}&to=${TODAY}`)).body.data;
+    expect(whos(ev, 'personId')).toEqual(['mj', 'si', 'vg']);
+    const reps = (await pm.get(`${API}/shift-reports`)).body.data;
+    expect(whos(reps, 'who')).toEqual(['si', 'vg']);
+    expect(reps.find((r) => r.who === 'si').internal).toEqual([{ cat: 'Learning', h: 1, note: 'si internal' }]);
+    // narrowed to one team member; someone outside the team falls back to their own data
+    expect(whos((await pm.get(`${API}/shift-reports?person=si`)).body.data, 'who')).toEqual(['si']);
+    expect(whos((await pm.get(`${API}/shift-reports?person=dn`)).body.data, 'who')).toEqual([]);
+  });
+
+  test('people below you without the Attendance & reports permission: own data only', async () => {
+    // dev (Team Member role, no att permission) has si reporting to them
+    expect(whos((await (await as('dev@test.io')).get(`${API}/shift-reports`)).body.data, 'who')).toEqual(['vg']);
+  });
+
+  test('Attendance & reports scope All sees everyone; turning it off means own only', async () => {
+    await Role.updateOne({ id: 'r-qa' }, { 'perms.att': { v: true, c: false, e: false, d: false, scope: 'all' } });
+    expect(whos((await (await as('qa@test.io')).get(`${API}/shift-reports`)).body.data, 'who')).toEqual(['dn', 'si', 'vg']);
+    await Role.updateOne({ id: 'r-pm' }, { 'perms.att': { v: false, c: false, e: false, d: false, scope: 'all' } });
+    expect(whos((await (await as('pm@test.io')).get(`${API}/shift-reports`)).body.data, 'who')).toEqual([]);
+    await Role.updateOne({ id: 'r-qa' }, { 'perms.att': { v: false, c: false, e: false, d: false, scope: 'all' } });
+  });
+
+  test('someone with no team still sees only their own', async () => {
+    const qa = await as('qa@test.io');
+    expect(whos((await qa.get(`${API}/shift-reports`)).body.data, 'who')).toEqual(['dn']);
+    expect(whos((await qa.get(`${API}/attendance/events?from=${TODAY}&to=${TODAY}`)).body.data, 'personId')).toEqual(['dn']);
+  });
+
+  test('live state stays the caller\'s own', async () => {
+    const st = (await (await as('pm@test.io')).get(`${API}/live/state`)).body.data;
+    expect(Object.keys(st.att)).toEqual(['mj']);
+  });
+});

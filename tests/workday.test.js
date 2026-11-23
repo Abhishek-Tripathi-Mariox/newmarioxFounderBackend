@@ -1,0 +1,334 @@
+import { ActiveTimer, ActivityFeed, AttendanceEvent, FollowUp, LeadActivity, Presence, Project, ProjectMember, ShiftReport, Task, TimeLog } from '../src/db/models/index.js';
+import { resetDb, as, closeDb, clearTokens } from './helpers.js';
+import { sod, ymd, MINUTE, HOUR } from '../src/modules/workday/time.js';
+
+const W = '/api/v1/workday';
+
+/** Move all of a person's events today back by `ms` (keeps their order). */
+const backdateDay = (pid, ms) => AttendanceEvent.updateMany({ person_id: pid }, [{ $set: { at: { $subtract: ['$at', ms] } } }]);
+
+beforeAll(async () => {
+  clearTokens();
+  await resetDb();
+  await Task.insertMany([
+    { id: 'T1', project_id: 'PR-101', milestone_id: 'PR-101-M2', title: 'Checkout API', assignee_id: 'vg', status: 'In progress' },
+    { id: 'T2', project_id: 'PR-102', milestone_id: 'PR-102-M1', title: 'Beta wireframes', assignee_id: 'km', status: 'To do' },
+  ]);
+});
+afterAll(closeDb);
+
+describe('access', () => {
+  test('clients have no workday', async () => {
+    const res = await (await as('client@test.io')).get(`${W}/me`);
+    expect(res.status).toBe(403);
+  });
+  test('unauthenticated → 401', async () => {
+    const { default: request } = await import('supertest');
+    const { app } = await import('./helpers.js');
+    expect((await request(app).get(`${W}/me`)).status).toBe(401);
+  });
+});
+
+describe('delivery day: check-in → timer → break → resume → end shift', () => {
+  let dev;
+  // How far we can safely move today's events back without crossing midnight.
+  const shift = Math.min(3 * HOUR, Date.now() - sod(Date.now()) - 2000);
+
+  beforeAll(async () => { dev = await as('dev@test.io'); });
+
+  test('starts not checked in; cannot break or start a timer', async () => {
+    const me = await dev.get(`${W}/me`);
+    expect(me.status).toBe(200);
+    expect(me.body.data).toMatchObject({ pid: 'vg', status: 'Not checked in', checkedIn: false, workedMs: 0, timer: null });
+    const b = await dev.post(`${W}/break`).send({ type: 'Lunch' });
+    expect(b.status).toBe(422);
+    expect(b.body.error.code).toBe('RULE_VIOLATION');
+    expect((await dev.post(`${W}/timer/start`).send({ taskId: 'T1' })).status).toBe(422);
+    expect((await dev.post(`${W}/check-out`)).status).toBe(422);
+  });
+
+  test('check in (twice → 409)', async () => {
+    const r = await dev.post(`${W}/check-in`);
+    expect(r.status).toBe(200);
+    expect((await dev.post(`${W}/check-in`)).status).toBe(409);
+    await backdateDay('vg', shift);
+    const me = (await dev.get(`${W}/me`)).body.data;
+    expect(me.status).toBe('Working');
+    expect(me.events.map((e) => e.kind)).toEqual(['login']);
+    expect(me.workedMs).toBeGreaterThanOrEqual(shift - 1000);
+    const feed = await ActivityFeed.find({ person_id: 'vg', kind: 'in' }).rows();
+    expect(feed[0].text).toBe('Checked in');
+  });
+
+  test('timer: invalid break type 422, task outside scope 404, start ok', async () => {
+    expect((await dev.post(`${W}/break`).send({ type: 'Nap' })).status).toBe(422);
+    expect((await dev.post(`${W}/timer/start`).send({ taskId: 'T2' })).status).toBe(404);
+    const r = await dev.post(`${W}/timer/start`).send({ taskId: 'T1' });
+    expect(r.status).toBe(200);
+    expect(r.body.data.message).toBe('Timer started · Checkout API');
+    const me = (await dev.get(`${W}/me`)).body.data;
+    expect(me.timer).toMatchObject({ taskId: 'T1', projectId: 'PR-101', title: 'Checkout API' });
+  });
+
+  test('break stops the timer and logs its time', async () => {
+    await ActiveTimer.updateMany({ person_id: 'vg' }, [{ $set: { started_at: { $subtract: ['$started_at', 6 * MINUTE] } } }]);
+    const r = await dev.post(`${W}/break`).send({ type: 'Lunch', note: 'canteen' });
+    expect(r.status).toBe(200);
+    expect(r.body.data).toMatchObject({ type: 'Lunch', planMin: 45, note: 'canteen' });
+    expect(r.body.data.message).toMatch(/^Lunch break started · back by /);
+    expect(r.body.data.log).toMatchObject({ projectId: 'PR-101', milestoneId: 'PR-101-M2', note: 'Checkout API · timer' });
+
+    const logs = await TimeLog.find({ member_id: 'vg' }).rows();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ source: 'timer', note: 'Checkout API · timer', day: ymd(Date.now()) });
+    expect(logs[0].hours).toBeCloseTo(0.1, 1);
+    expect(await ActiveTimer.find({ person_id: 'vg' }).rows()).toHaveLength(0);
+    const stop = await ActivityFeed.findOne({ person_id: 'vg', kind: 'stop' }).rows();
+    expect(stop.text).toMatch(/^Stopped timer · Checkout API · 6m$/);
+
+    const me = (await dev.get(`${W}/me`)).body.data;
+    expect(me.status).toBe('On break');
+    expect(me.break).toMatchObject({ type: 'Lunch', planMin: 45, note: 'canteen', over: false });
+    expect((await dev.post(`${W}/break`).send({ type: 'Tea / coffee' })).status).toBe(409);
+    expect((await dev.post(`${W}/timer/start`).send({ taskId: 'T1' })).status).toBe(422);
+  });
+
+  test('end break → "Welcome back" with overBy', async () => {
+    const canOverrun = shift > 55 * MINUTE;
+    if (canOverrun) {
+      await AttendanceEvent.updateMany({ person_id: 'vg', kind: 'break' }, [{ $set: { at: { $subtract: ['$at', 50 * MINUTE] } } }]);
+      const me = (await dev.get(`${W}/me`)).body.data;
+      expect(me.break.over).toBe(true);
+    }
+    const r = await dev.post(`${W}/break/end`);
+    expect(r.status).toBe(200);
+    if (canOverrun) {
+      expect(r.body.data.length).toBe('50m');
+      expect(r.body.data.overBy).toBe('5m');
+      expect(r.body.data.message).toBe('Welcome back · 50m break · 5m over');
+    } else {
+      expect(r.body.data.overBy).toBeNull();
+    }
+    expect((await dev.post(`${W}/break/end`)).status).toBe(422);
+    const me = (await dev.get(`${W}/me`)).body.data;
+    expect(me.status).toBe('Working');
+    expect(me.events.map((e) => e.kind)).toEqual(['login', 'break', 'resume']);
+    expect(me.breaks).toBe(1);
+  });
+
+  test('timer stop creates a time log', async () => {
+    await dev.post(`${W}/timer/start`).send({ taskId: 'T1' });
+    await ActiveTimer.updateMany({ person_id: 'vg' }, [{ $set: { started_at: { $subtract: ['$started_at', 3 * MINUTE] } } }]);
+    const r = await dev.post(`${W}/timer/stop`);
+    expect(r.status).toBe(200);
+    expect(r.body.data.log.hours).toBeCloseTo(0.05, 2);
+    expect(await TimeLog.find({ member_id: 'vg', source: 'timer' }).rows()).toHaveLength(2);
+    expect((await dev.post(`${W}/timer/stop`)).status).toBe(422);
+  });
+
+  test('heartbeat updates presence', async () => {
+    const r = await dev.post(`${W}/heartbeat`);
+    expect(r.status).toBe(200);
+    expect(await Presence.findOne({ person_id: 'vg' }).rows()).toBeTruthy();
+  });
+
+  test('end-shift form is prefilled', async () => {
+    await dev.post(`${W}/timer/start`).send({ taskId: 'T1' });
+    const r = await dev.get(`${W}/end-shift`);
+    expect(r.status).toBe(200);
+    const f = r.body.data;
+    expect(f.sales).toBe(false);
+    expect(f.rows.map((x) => x.p)).toEqual(['PR-101']);
+    expect(f.rows[0].ms).toBe('PR-101-M2');
+    expect(f.rows[0].note).toContain('Checkout API · timer');
+    expect(f.pmRows).toEqual([]);
+    expect(f.workedHours).toBeGreaterThan(0);
+  });
+
+  test('end-shift validation (frontend wording)', async () => {
+    let r = await dev.post(`${W}/end-shift`).send({ rows: [{ p: 'PR-101', h: '' }], done: 'x' });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toBe('Add hours for at least one project or internal work.');
+    r = await dev.post(`${W}/end-shift`).send({ rows: [{ p: 'PR-101', h: 20 }], done: 'x' });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toMatch(/^Logged 20h but you worked (\d+h )?\d+m\. Reduce hours to match time worked\.$/);
+    r = await dev.post(`${W}/end-shift`).send({ rows: [{ p: 'PR-101', h: 0.01 }], done: '  ' });
+    expect(r.body.error.message).toBe('Write what you completed today.');
+    r = await dev.post(`${W}/end-shift`).send({ rows: [{ p: 'PR-101', h: 30 }], done: 'x' });
+    expect(r.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('end-shift submit replaces today\'s logs and checks out', async () => {
+    const worked = (await dev.get(`${W}/end-shift`)).body.data.workedHours;
+    const h = Math.min(1, Math.floor(worked * 100) / 100);
+    const r = await dev.post(`${W}/end-shift`).send({
+      rows: [{ p: 'PR-101', ms: 'PR-101-M2', h: String(h), note: 'Checkout API' }, { p: '', h: '' }],
+      done: 'Finished checkout API', blockers: '', plan: 'Tests', pmRows: [],
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.data.message).toBe('Report submitted · shift ended');
+    const logs = await TimeLog.find({ member_id: 'vg', day: ymd(Date.now()) }).rows();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ project_id: 'PR-101', milestone_id: 'PR-101-M2', source: 'shift-report', note: 'Checkout API' });
+    const rep = await ShiftReport.findOne({ person_id: 'vg' }).rows();
+    expect(rep).toMatchObject({ is_sales: false, done: 'Finished checkout API', plan: 'Tests' });
+    const me = (await dev.get(`${W}/me`)).body.data;
+    expect(me.status).toBe('Checked out');
+    expect(me.timer).toBeNull();
+    expect(me.events.at(-1).kind).toBe('logout');
+    expect(await ActivityFeed.find({ person_id: 'vg', kind: 'out', text: 'Checked out' }).rows()).toHaveLength(1);
+  });
+
+  test('end-shift with internal (non-project) work', async () => {
+    const dev2 = await as('dev2@test.io');
+    await dev2.post(`${W}/check-in`);
+    await backdateDay('si', 3 * 3600e3); // worked ~3h
+    let r = await dev2.post(`${W}/end-shift`).send({ internalRows: [{ cat: 'Meeting', h: 1, note: ' ' }], done: 'x' });
+    expect(r.body.error.message).toBe('Describe the internal work you did (row 1).');
+    r = await dev2.post(`${W}/end-shift`).send({
+      rows: [{ p: 'PR-101', h: 2 }], internalRows: [{ cat: 'Learning', h: 1.5, note: 'Course' }], done: 'x',
+    });
+    expect(r.body.error.message).toMatch(/^Logged 3\.5h but you worked/);
+
+    r = await dev2.post(`${W}/end-shift`).send({
+      internalRows: [{ cat: 'Meeting', h: 1, note: 'Sprint planning' }, { cat: 'Learning', h: 0.5, note: 'React 19 docs' }, { cat: 'Other', h: '', note: '' }],
+      done: 'Planning + learning',
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.data.report.internal).toEqual([{ cat: 'Meeting', h: 1, note: 'Sprint planning' }, { cat: 'Learning', h: 0.5, note: 'React 19 docs' }]);
+    expect(await TimeLog.find({ member_id: 'si', day: ymd(Date.now()) }).rows()).toHaveLength(0); // internal hours are not project logs
+    const ceo = await as('ceo@test.io');
+    const reps = (await ceo.get('/api/v1/shift-reports')).body.data.filter((x) => x.who === 'si');
+    expect(reps.at(-1).internal).toHaveLength(2);
+  });
+
+  test('check-out resumes an open break first', async () => {
+    const qa = await as('qa@test.io');
+    await qa.post(`${W}/check-in`);
+    await qa.post(`${W}/break`).send({ type: 'Personal' });
+    const r = await qa.post(`${W}/check-out`);
+    expect(r.status).toBe(200);
+    const kinds = (await AttendanceEvent.find({ person_id: 'dn' }).sort({ _id: 1 }).rows()).map((e) => e.kind);
+    expect(kinds).toEqual(['login', 'break', 'resume', 'logout']);
+  });
+
+  test('no second check-in the same day after checking out (Super Admin can reopen)', async () => {
+    const qa = await as('qa@test.io');
+    const r = await qa.post(`${W}/check-in`);
+    expect(r.status).toBe(409);
+    expect(r.body.error.message).toBe("Today's shift has ended — you can check in again tomorrow.");
+    const ceo = await as('ceo@test.io');
+    expect((await ceo.post('/api/v1/live/dn/check-in')).status).toBe(200);
+  });
+});
+
+describe('PM and sales end-shift forms', () => {
+  test('PM gets status rows for projects they manage', async () => {
+    const f = (await (await as('pm@test.io')).get(`${W}/end-shift`)).body.data;
+    expect(f.pmRows.map((x) => x.p).sort()).toEqual(['PR-101', 'PR-102']);
+    expect(f.pmRows[0].st).toBe('On track');
+  });
+
+  test('projects I manage (even off the team list / not running) are pre-filled and listed as mine', async () => {
+    const pmRow = await Project.findOne({ id: 'PR-102' }).select('status').rows();
+    await Project.updateMany({ id: 'PR-102' }, { status: 'Planning' });
+    await ProjectMember.deleteMany({ project_id: 'PR-102', member_id: 'mj' });
+    try {
+      const f = (await (await as('pm@test.io')).get(`${W}/end-shift`)).body.data;
+      expect(f.rows.map((r) => r.p)).toContain('PR-102');
+      expect(f.projects.find((x) => x.id === 'PR-102')).toMatchObject({ onTeam: true });
+    } finally {
+      await Project.updateMany({ id: 'PR-102' }, { status: pmRow.status });
+    }
+  });
+
+  test('sales form has auto stats; summary is required', async () => {
+    await LeadActivity.insertMany([{ lead_id: 'MX-1002', kind: 'call', text: 'Called Riya' }, { lead_id: 'MX-1002', kind: 'email', text: 'Sent deck' }]);
+    const se = await as('se@test.io');
+    const f = (await se.get(`${W}/end-shift`)).body.data;
+    expect(f.sales).toBe(true);
+    expect(f.calls).toBe(1);
+    expect(f.auto).toMatchObject({ leadsTouched: 1, calls: 1, emails: 1, quotes: 0 });
+    expect(f.auto.followUpsDone).toBe('0 / 0');
+    expect(f.leadRows).toEqual([{ lead: 'MX-1002', kind: 'email', note: '', next: '' }]);
+    await se.post(`${W}/check-in`);
+    let r = await se.post(`${W}/end-shift`).send({ outcome: ' ', calls: '1' });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toBe('Write a short summary of your day.');
+    r = await se.post(`${W}/end-shift`).send({ outcome: 'Good calls', calls: '3', meetings: '' });
+    expect(r.status).toBe(200);
+    expect(await ShiftReport.findOne({ person_id: 'ps' }).rows()).toMatchObject({ is_sales: true, calls: 3, meetings: 0, outcome: 'Good calls' });
+    expect((await se.get(`${W}/me`)).body.data.status).toBe('Checked out');
+  });
+
+  test('sales lead rows → lead history + next follow-up; internal work; scope checked', async () => {
+    const sm = await as('sm@test.io'); // Aman (ak) owns MX-1001
+    await sm.post(`${W}/check-in`);
+    await AttendanceEvent.updateMany({ person_id: 'ak' }, { at: new Date(Date.now() - 3 * 3600e3) });
+    const d = new Date(Date.now() + 2 * 864e5);
+    const next = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    // someone else's lead is refused (Sales Executive with own scope)
+    const se = await as('se@test.io');
+    let r = await se.post(`${W}/end-shift`).send({ outcome: 'x', leadRows: [{ lead: 'MX-1001', kind: 'call', note: 'x' }] });
+    expect(r.status).toBe(422);
+    // internal work over time worked is refused; blank description too
+    r = await sm.post(`${W}/end-shift`).send({ outcome: 'Day', internalRows: [{ cat: 'Meeting', h: 5, note: 'Team sync' }] });
+    expect(r.body.error.message).toMatch(/^Internal work is 5h but you worked/);
+    r = await sm.post(`${W}/end-shift`).send({ outcome: 'Day', internalRows: [{ cat: 'Meeting', h: 1, note: ' ' }] });
+    expect(r.body.error.message).toBe('Describe the internal work you did (row 1).');
+    r = await sm.post(`${W}/end-shift`).send({
+      outcome: 'Moved Zenvy forward', calls: 2,
+      leadRows: [{ lead: 'MX-1001', kind: 'call', note: 'Asked for revised quote', next }],
+      internalRows: [{ cat: 'Meeting', h: 1, note: 'Sales team weekly review' }],
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.data.message).toBe('Report submitted · shift ended · 1 follow-up scheduled');
+    const acts = (await LeadActivity.find({ lead_id: 'MX-1001' }).rows()).map((a) => a.text);
+    expect(acts).toContain('End of day · Call: Asked for revised quote');
+    const fu = await FollowUp.findOne({ lead_id: 'MX-1001', done: false }).rows();
+    expect(fu).toMatchObject({ type: 'Call', title: 'Follow up · Zenvy Retail', owner_id: 'ak' });
+    const rep = (await (await as('ceo@test.io')).get('/api/v1/shift-reports?person=ak')).body.data.at(-1);
+    expect(rep.leadRows).toEqual([{ lead: 'MX-1001', company: 'Zenvy Retail', kind: 'call', note: 'Asked for revised quote', next }]);
+    expect(rep.internal).toEqual([{ cat: 'Meeting', h: 1, note: 'Sales team weekly review' }]);
+  });
+
+  test('sales cannot run task timers', async () => {
+    const sm = await as('sm@test.io');
+    await sm.post(`${W}/check-in`);
+    const r = await sm.post(`${W}/timer/start`).send({ taskId: 'T1' });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toBe('Timers are for delivery staff.');
+  });
+});
+
+describe('logged hours vs time worked', () => {
+  test('manual log hours cannot exceed check-in time minus breaks', async () => {
+    const pm = await as('pm@test.io'); // member mj
+    await pm.post(`${W}/check-in`);
+    await backdateDay('mj', 3 * 3600e3); // checked in 3h ago
+    await pm.post(`${W}/break`).send({ type: 'Lunch' });
+    // the break started 1h ago and has just ended → worked ≈ 2h
+    await AttendanceEvent.updateMany({ person_id: 'mj', kind: 'break' }, { at: new Date(Date.now() - HOUR) });
+    await pm.post(`${W}/break/end`);
+    const day = ymd(Date.now());
+    let r = await pm.post('/api/v1/time-logs').send({ memberId: 'mj', date: day, rows: [{ projectId: 'PR-101', hours: 3, note: 'x' }] });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toMatch(/^Only 2h( \d+m)? was worked that day \(check-in time minus breaks\) and 0h is already logged — you can add at most 2h more\.$/);
+    r = await pm.post('/api/v1/time-logs').send({ memberId: 'mj', date: day, rows: [{ projectId: 'PR-101', hours: 1.5, note: 'x' }] });
+    expect(r.status).toBe(201);
+    r = await pm.post('/api/v1/time-logs').send({ memberId: 'mj', date: day, rows: [{ projectId: 'PR-101', hours: 1, note: 'y' }] });
+    expect(r.status).toBe(422);
+    expect(r.body.error.message).toMatch(/1\.5h is already logged — you can add at most 0\.5h more/);
+  });
+});
+
+describe('per-person lock', () => {
+  test('two simultaneous check-ins write one login (the other gets 409)', async () => {
+    const ceo = await as('ceo@test.io');
+    const res = await Promise.all([1, 2, 3].map(() => ceo.post('/api/v1/live/km/check-in')));
+    expect(res.map((r) => r.status).sort()).toEqual([200, 409, 409]);
+    expect(await AttendanceEvent.countDocuments({ person_id: 'km', kind: 'login' })).toBe(1);
+    const presence = await Presence.findOne({ person_id: 'km' }).rows();
+    expect(presence).toMatchObject({ lock_token: null, locked_until: null });
+  });
+});
