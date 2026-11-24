@@ -22,6 +22,7 @@ Users & roles; sales owners and team members are created with their user account
 |---|---|
 | `npm run dev` / `npm start` | API with file watching / production start |
 | `npm run seed` | Indexes + base data + first Super Admin (idempotent — never overwrites existing data or passwords) |
+| `npm run migrate:legacy` | One-off copy of the old apps' data (internal portal Postgres, partner portal, Founders HQ) into this database; `--dry-run` first — runbook and `LEGACY_*` variables: `../docs/MIGRATION.md` |
 | `npm test` | Full test suite (serial, real MongoDB, throwaway database per run) |
 | `npm run lint` | ESLint |
 
