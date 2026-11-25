@@ -1,8 +1,8 @@
 /**
  * Projects business rules (port of store/slices/delivery.js: saveProj, updProj, setAlloc, addMember,
  * removeMember, setProjLinks, portalOn/Off, updMs, askApproval) + read models (list, detail,
- * overview, capacity). Row scope comes from core/scope.visibleProjectIds; edits are PM-only
- * (frontend isPMof: Super Admin, or a Project Manager who is the project's PM).
+ * overview, capacity). Row scope comes from core/scope.visibleProjectIds; edits need isPMof():
+ * Super Admin, or Projects → Edit with the project inside the role's projects scope.
  */
 import { randomBytes } from 'node:crypto';
 import { tx } from '../../db/mongo.js';
@@ -10,7 +10,7 @@ import { ChangeRequest, Member, Milestone, MilestoneMember, Project, ProjectLink
 import { nextId } from '../../core/ids.js';
 import { visibleProjectIds } from '../../core/scope.js';
 import { forbidden, notFound, unprocessable } from '../../core/errors.js';
-import { can } from '../../middleware/authorize.js';
+import { can, scopeOf } from '../../middleware/authorize.js';
 import { pageParams } from '../../core/http.js';
 import * as repo from './projects.repository.js';
 import { toDocument } from './projects.mapper.js';
@@ -23,10 +23,18 @@ import { emailMilestoneToClient, clientMailNote } from './clientEmails.js';
 /* ───────────── Access helpers (shared with milestones, change requests, portal) ───────────── */
 
 /**
- * Frontend isPMof(): Super Admin, or the project's PM (its `pmId` is their member id) whose role can
- * edit projects — any role, not only the built-in Project Manager.
+ * May `user` manage (edit) project `p`? Mirrors the frontend isPMof(). Super Admin always; otherwise
+ * the role needs Projects → Edit, and the project must be inside the role's projects scope:
+ * scope All = any project; Team / Own = projects the person runs as PM or is on the team of.
  */
-export const isPMof = (user, p) => !!user && (user.isSuper || (can(user, 'projects', 'e') && !!p && !!user.memberId && user.memberId === p.pmId));
+export const isPMof = (user, p) => {
+  if (!user || !p) return false;
+  if (user.isSuper) return true;
+  if (!can(user, 'projects', 'e')) return false;
+  if (scopeOf(user, 'projects') === 'all') return true;
+  const mid = user.memberId;
+  return !!mid && (p.pmId === mid || (p.team || []).some((t) => (t && (t.memberId || t)) === mid));
+};
 
 export async function canSee(user, projectId) {
   const ids = await visibleProjectIds(user);
@@ -44,7 +52,7 @@ export async function visibleProject(user, id, session = null) {
 export async function pmProject(user, id, session = null) {
   const p = await repo.findProject(id, session);
   if (!p) throw notFound('Project');
-  if (!isPMof(user, p)) throw forbidden("Only the project's PM can change this");
+  if (!isPMof(user, p)) throw forbidden('Your role can’t edit this project. It needs Projects → Edit, and this project must be in its scope (or you must be its PM).');
   return p;
 }
 
@@ -382,7 +390,7 @@ async function pmMilestone(user, mid, session = null) {
   const p = await repo.findProject(m.projectId, session);
   if (!isPMof(user, p)) {
     if (!(await canSee(user, p.id))) throw notFound('Milestone');
-    throw forbidden("Only the project's PM can change this");
+    throw forbidden('Your role can’t edit this project. It needs Projects → Edit, and this project must be in its scope (or you must be its PM).');
   }
   return { m, p };
 }

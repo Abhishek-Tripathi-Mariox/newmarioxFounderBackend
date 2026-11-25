@@ -125,15 +125,16 @@ describe('POST /projects (saveProj)', () => {
   });
 });
 
-describe('PM-only edits', () => {
-  test('team member and non-PM admin get 403; PM succeeds', async () => {
+describe('Project edits follow the role (Projects → Edit + scope)', () => {
+  test('team member without Projects Edit gets 403; admin (Edit, scope All) and PM succeed', async () => {
     const dev = await as('dev@test.io');
     expect((await dev.patch('/api/v1/projects/PR-101').send({ status: 'On hold' })).status).toBe(403);
     expect((await dev.put('/api/v1/projects/PR-101/members/vg').send({ allocHours: 999 })).status).toBe(403);
     expect((await dev.patch('/api/v1/milestones/PR-101-M2').send({ name: 'x' })).status).toBe(403);
+    // Admin is not this project's PM, but its role has Projects → Edit with scope All.
     const admin = await as('admin@test.io');
-    const a = await admin.put('/api/v1/projects/PR-101/members/vg').send({ allocHours: 999 });
-    expect(a.status).toBe(403);
+    const a = await admin.put('/api/v1/projects/PR-101/members/vg').send({ allocHours: 12 });
+    expect(a.status).toBe(200);
 
     const pm = await as('pm@test.io');
     const res = await pm.patch('/api/v1/projects/PR-101').send({ status: 'On hold', statusReason: 'Client end', priority: 'Low' });

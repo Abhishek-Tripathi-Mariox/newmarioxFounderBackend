@@ -23,11 +23,9 @@ describe('change requests', () => {
     expect(res.status).toBe(422);
   });
 
-  test('only the PM can create / act', async () => {
+  test('a role without Projects → Edit cannot create / act', async () => {
     const dev = await as('dev@test.io');
     expect((await dev.post('/api/v1/change-requests').send(base)).status).toBe(403);
-    const admin = await as('admin@test.io');
-    expect((await admin.post('/api/v1/change-requests').send(base)).status).toBe(403);
   });
 
   let id;
@@ -134,5 +132,10 @@ describe('change requests', () => {
     expect((await dev.get('/api/v1/change-requests')).body.meta.total).toBe(2);
     const se = await as('se@test.io'); // no projects permission
     expect((await se.get('/api/v1/change-requests')).status).toBe(403);
+  });
+  test('a non-PM with Projects → Edit and scope All (Admin) can raise a CR', async () => {
+    const admin = await as('admin@test.io');
+    const res = await admin.post('/api/v1/change-requests').send(base);
+    expect(res.status).toBe(201);
   });
 });
